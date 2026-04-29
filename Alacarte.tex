@@ -1,0 +1,1315 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage[margin=2.4cm]{geometry}
+\usepackage{amsmath,amssymb,mathtools}
+\usepackage{booktabs,longtable,array}
+\usepackage{enumitem}
+\usepackage{xurl}
+\usepackage[colorlinks=true,linkcolor=blue,urlcolor=blue,citecolor=blue]{hyperref}
+
+\setlist{nosep,leftmargin=2em}
+\renewcommand{\arraystretch}{1.18}
+
+\newcommand{\Rset}{\mathcal{R}}
+\newcommand{\Sset}{\mathcal{S}}
+\newcommand{\Uset}{\mathcal{U}}
+\newcommand{\Jset}{\mathcal{J}}
+\newcommand{\vol}{\operatorname{vol}}
+\newcommand{\Exp}{\mathbb{E}}
+\newcommand{\Prob}{\mathbb{P}}
+\newcommand{\Uniform}{\operatorname{Uniform}}
+\newcommand{\Normal}{\mathcal{N}}
+\newcommand{\LogNormal}{\operatorname{LogNormal}}
+\newcommand{\ExpDist}{\operatorname{Exp}}
+\newcommand{\dtype}{\texttt{dtype}}
+\newcommand{\code}[1]{\texttt{#1}}
+
+\title{Alacarte: Algorithm Documentation for Rectangle Synthetic Data Generation with Controllable Output Density}
+\date{}
+\begin{document}
+\maketitle
+
+\begin{abstract}
+This document provides a unified presentation of the rectangle and hyperrectangle synthetic data generation algorithms implemented in \code{Alacarte} and \code{Alacarte-Rectgen}. The algorithm is designed for benchmarking multidimensional spatial joins. Given two input cardinalities $n_R,n_S$, the dimensionality $d$, a target output density $\alpha_{\mathrm{out}}^\star$, and parameters controlling the volume and aspect-ratio distributions, it generates two sets of axis-aligned half-open hyperrectangles $R,S$ such that the spatial-join output density
+\[
+  \alpha_{\mathrm{out}}=\frac{|\Jset(R,S)|}{|R|+|S|}
+\]
+is close to the target value in statistical expectation. The central idea is to convert the difficult problem of directly controlling the join output size into a one-dimensional inverse problem over a coverage parameter $C$: first estimate $\alpha_{\mathrm{exp}}(C)$ by combining Monte Carlo sampling with an analytical formula for one-dimensional interval intersections, then solve for $C$ using interval expansion and binary search in log-space, and finally generate concrete rectangle data under the resulting coverage.
+\end{abstract}
+
+\section{Sources, Objective, and Unified Perspective}
+
+This document is based on the public specifications and implementations of two repositories:
+\begin{itemize}
+  \item DANNHIROAKI/Alacarte: a specification-oriented repository with a single-file prototype implementation. It includes the problem definition, the coverage model, the intersection-probability formula, the solving procedure, and the core interface.
+  \item DANNHIROAKI/Alacarte-Rectgen: an installable Python package that provides the core implementation, tests, examples, and stress-test scripts.
+\end{itemize}
+The two repositories follow the same algorithmic principle. This document consolidates them into a single unified algorithm specification, using notation, boundary handling, and pseudocode that are as close as possible to the implementation.
+
+\paragraph{Generation objective.}
+Given
+\[
+  n_R,\quad
+  n_S,\quad
+  d,\quad
+  \alpha_{\mathrm{out}}^\star,\quad
+  \Uset,\quad
+  \text{volume distribution},\quad
+  \mathrm{CV},\quad
+  \sigma_{\mathrm{shape}},\quad
+  \text{seed},
+\]
+the goal is to generate two sets of $d$-dimensional axis-aligned hyperrectangles
+\[
+  R=\{r_1,\dots,r_{n_R}\},\qquad
+  S=\{s_1,\dots,s_{n_S}\},
+\]
+such that
+\[
+  \Exp\!\left[\frac{|\Jset(R,S)|}{n_R+n_S}\right]
+  \approx
+  \alpha_{\mathrm{out}}^\star.
+\]
+The expectation is taken over the randomness in volume sampling, aspect-ratio sampling, and position sampling. It is important to emphasize that the algorithm directly controls the expected output density, rather than guaranteeing that the realized join cardinality of a particular random draw is exactly equal to the target.
+
+\section{Spatial Model and Join Predicate}
+
+\subsection{Universe}
+
+Let the spatial domain be a $d$-dimensional half-open hyperrectangle
+\[
+  \Uset=\prod_{k=1}^{d}[u_k^{\min},u_k^{\max}),
+\]
+where the span of the $k$-th dimension is
+\[
+  W_k=u_k^{\max}-u_k^{\min}>0,
+\]
+and the total volume is
+\[
+  V_{\Uset}=\prod_{k=1}^{d}W_k.
+\]
+If the user does not provide \code{universe}, the implementation defaults to the unit hypercube
+\[
+  \Uset=[0,1)^d.
+\]
+In the implementation, \code{universe} must be an array of shape $(d,2)$; each row stores $[u_k^{\min},u_k^{\max}]$. If the shape is inconsistent, or if any dimension satisfies $u_k^{\max}\le u_k^{\min}$, an error should be raised.
+
+\subsection{Box Representation}
+
+Each object $b$ is a $d$-dimensional axis-aligned half-open hyperrectangle:
+\[
+  b=\prod_{k=1}^{d}[\ell_k,u_k)\subseteq\mathbb{R}^{d}.
+\]
+The half-open convention has two advantages:
+\begin{enumerate}
+  \item cases where boundaries coincide but have no positive-length overlap are not incorrectly counted as intersections;
+  \item the representation is more consistent with common rectangle encodings in spatial databases and benchmarks.
+\end{enumerate}
+
+Given two boxes $r$ and $s$, they intersect under the \code{intersects} predicate if and only if they strictly overlap in every dimension:
+\[
+  r\cap s\ne\varnothing
+  \quad\Longleftrightarrow\quad
+  \forall k\in\{1,\dots,d\}:\;
+  \max(\ell^{(r)}_k,\ell^{(s)}_k)<
+  \min(u^{(r)}_k,u^{(s)}_k).
+\]
+
+The spatial-join result set is defined as
+\[
+  \Jset(R,S)=\{(r,s)\in R\times S\mid r\cap s\ne\varnothing\}.
+\]
+
+\subsection{Output Density}
+
+Alacarte measures the computational load of a join using the normalized output density
+\[
+  \alpha_{\mathrm{out}}
+  =\frac{|\Jset(R,S)|}{|R|+|S|}
+  =\frac{|\Jset(R,S)|}{n_R+n_S}.
+\]
+It can be interpreted as the average number of join edges contributed by each input object in the bipartite graph over $R\cup S$. This definition is useful because it enables comparison of join-output loads across different input sizes.
+
+Since the maximum join-result size satisfies $|\Jset(R,S)|\le n_Rn_S$, the target density must satisfy
+\[
+  0\le \alpha_{\mathrm{out}}^\star
+  \le
+  \alpha_{\max}
+  :=\frac{n_Rn_S}{n_R+n_S}.
+\]
+If $\alpha_{\mathrm{out}}^\star>\alpha_{\max}$, the algorithm should regard the target as infeasible and raise an error.
+
+\section{Coverage: From Target Output Density to Geometric Scale}
+
+\subsection{Definition of Coverage}
+
+For either object set $T\in\{R,S\}$, let $|T|=n_T$. The coverage parameter $C$ is defined as the total volume of all boxes in the set, normalized by the volume of the universe:
+\[
+  C
+  :=
+  \frac{\sum_{b\in T}\vol(b)}{V_{\Uset}}.
+\]
+In the generation model, $C$ is not computed retrospectively from already generated data. Instead, it is an internal parameter used to control the average geometric scale of the objects. Given $C$, the target average volume of an object in set $T$ is
+\[
+  \bar v_T
+  =\frac{C\,V_{\Uset}}{n_T}.
+\]
+Thus, as $n_T$ increases, the average volume of a single box shrinks proportionally to $1/n_T$, so that the aggregate filling degree remains comparable for a fixed $C$.
+
+\subsection{Why Solving for Coverage Is Sufficient}
+
+The output size of a spatial join is primarily governed by two factors:
+\begin{enumerate}
+  \item the volumes and side lengths of the objects, i.e., their geometric scale;
+  \item the position distribution of the objects within the universe.
+\end{enumerate}
+Alacarte fixes the position model to uniform placement over the feasible region in which a given box fits, and uses $C$ to control the average scale of all boxes. Consequently, the target-output-density problem is transformed into the one-dimensional inverse problem
+\[
+  \text{find } C\ge 0
+  \quad\text{s.t.}\quad
+  \alpha_{\mathrm{exp}}(C)\approx \alpha_{\mathrm{out}}^\star.
+\]
+Here $\alpha_{\mathrm{exp}}(C)$ denotes the expected output density under coverage $C$.
+
+\section{Random Geometric Generation Model}
+
+Each box is generated in three steps: sample its volume, sample its shape factor and convert it into side lengths, and then sample its spatial position.
+
+\subsection{Volume Sampling}
+
+For a set $T\in\{R,S\}$, first compute the target average volume
+\[
+  \bar v_T=\frac{C V_{\Uset}}{n_T}.
+\]
+Then independently sample a volume $V$ for each box. The implementation supports four volume distributions.
+
+\begin{longtable}{>{\raggedright\arraybackslash}p{3cm}p{10.5cm}}
+\toprule
+\textbf{Distribution} & \textbf{Sampling rule} \\
+\midrule
+\endhead
+\code{fixed} &
+$V=\bar v_T$. All objects have identical volume. \\
+\code{exponential} &
+$V\sim \ExpDist(\lambda=1/\bar v_T)$, equivalently an exponential distribution with scale $\bar v_T$, satisfying $\Exp[V]=\bar v_T$. \\
+\code{normal} &
+First sample $V'\sim\Normal(\bar v_T,(\mathrm{CV}\cdot\bar v_T)^2)$ and then truncate it to a positive value: $V=\max(V',\bar v_T\cdot10^{-12})$. This distribution has a very small mean bias due to truncation. \\
+\code{lognormal} &
+Let
+$\sigma_v=\sqrt{\log(1+\mathrm{CV}^2)}$ and
+$\mu_v=\log\bar v_T-\tfrac12\sigma_v^2$.
+Sample $V\sim\LogNormal(\mu_v,\sigma_v^2)$. Before any subsequent side-length truncation, this gives $\Exp[V]=\bar v_T$ and an approximate coefficient of variation $\mathrm{CV}$. \\
+\bottomrule
+\end{longtable}
+
+If a non-positive average volume is passed directly to the low-level function, the implementation returns a tiny positive volume, $10^{-18}$, to avoid degenerate intervals in subsequent output. This is primarily a numerical-invariant safeguard; the main solver returns $C=0$ directly when the target is $\alpha=0$.
+
+\subsection{Shape Factors and Side Lengths}
+
+Sampling a volume alone does not control the aspect ratio. Alacarte uses a shape-factor vector
+\[
+  \mathbf g=(g_1,\dots,g_d)
+\]
+to separate volume from aspect ratio. The vector is required to satisfy
+\[
+  \prod_{k=1}^{d}g_k=1.
+\]
+Given a volume $V$, the side length in dimension $k$ is defined as
+\[
+  \lambda_k=V^{1/d}g_k.
+\]
+If $\prod_k g_k=1$, then, in the absence of truncation,
+\[
+  \prod_{k=1}^{d}\lambda_k
+  =
+  \prod_{k=1}^{d}(V^{1/d}g_k)
+  =V\prod_{k=1}^{d}g_k
+  =V.
+\]
+
+The shape factors are sampled as follows:
+\begin{enumerate}
+  \item If $\sigma_{\mathrm{shape}}\le0$, then $g_k=1$ for all $k$; all objects are hypercubes. In two dimensions, they are squares.
+  \item If $\sigma_{\mathrm{shape}}>0$, first sample
+  \[
+    z_k\sim\Normal(0,\sigma_{\mathrm{shape}}^2),
+    \qquad k=1,\dots,d,
+  \]
+  and then set
+  \[
+    \tilde g_k=e^{z_k},
+    \qquad
+    g_k=\frac{\tilde g_k}{\left(\prod_{j=1}^{d}\tilde g_j\right)^{1/d}}.
+  \]
+\end{enumerate}
+Thus $\mathbf g$ follows a log-normal type random aspect-ratio model, while geometric-mean normalization guarantees $\prod_k g_k=1$.
+
+\subsection{Feasibility Truncation for Side Lengths}
+
+After sampling
+\[
+  \lambda_k=V^{1/d}g_k,
+\]
+each box must fit inside the universe. The implementation therefore applies, in every dimension,
+\[
+  \lambda_k
+  \leftarrow
+  \min\{\lambda_k,\,W_k(1-\varepsilon)\},
+  \qquad \varepsilon=10^{-12}.
+\]
+This truncation prevents $\lambda_k$ from being equal to or larger than $W_k$, thereby reducing degeneracies in placement and in the intersection-probability formula.
+
+It should be noted that once side-length truncation occurs, the actual volume of a box may be smaller than the originally sampled volume $V$. Therefore, coverage is a target scale-control parameter in the generation model, rather than a strict equality constraint on the realized sum of post-sampling volumes.
+
+\subsection{Position Sampling}
+
+Given a side-length vector $\boldsymbol\lambda=(\lambda_1,\dots,\lambda_d)$, the lower corner in each dimension is sampled uniformly over the feasible interval so that the box remains entirely inside the universe:
+\[
+  \ell_k\sim\Uniform(u_k^{\min},u_k^{\max}-\lambda_k).
+\]
+Then set
+\[
+  u_k=\ell_k+\lambda_k.
+\]
+Equivalently, the implementation samples $q_k\sim\Uniform(0,1)$ and computes
+\[
+  \ell_k=u_k^{\min}+q_k(W_k-\lambda_k),
+  \qquad
+  u_k=\ell_k+\lambda_k.
+\]
+Position sampling is independent across objects and dimensions; $R$ and $S$ are generated using different random seeds.
+
+\section{One-Dimensional Interval Intersection Probability}
+
+Coverage solving does not enumerate all $n_Rn_S$ pairs. Instead, it estimates the intersection probability of a random pair from the side-length distributions. The key observation is that, given two one-dimensional interval lengths $a$ and $b$, the probability that the intervals intersect after uniform placement in a one-dimensional universe of length $W$ has a closed form.
+
+\subsection{Setting}
+
+Let
+\[
+  X\sim\Uniform(0,W-a),
+  \qquad
+  Y\sim\Uniform(0,W-b),
+\]
+with $X$ and $Y$ independent. The two half-open intervals are
+\[
+  I=[X,X+a),
+  \qquad
+  J=[Y,Y+b).
+\]
+For $a,b\in[0,W]$, the intervals $I$ and $J$ intersect if and only if
+\[
+  X<Y+b
+  \quad\text{and}\quad
+  Y<X+a.
+\]
+
+\subsection{Closed-Form Formula}
+
+If $a+b\ge W$, the two intervals intersect regardless of their placement, and hence
+\[
+  P_{\mathrm{1D}}(a,b;W)=1.
+\]
+If $a+b<W$, non-intersection consists of two mutually exclusive events:
+\[
+  X+a\le Y
+  \quad\text{or}\quad
+  Y+b\le X.
+\]
+In the rectangular sampling domain $[0,W-a]\times[0,W-b]$, these two events correspond to two right triangles, each with area
+\[
+  \frac12(W-a-b)^2.
+\]
+The total non-intersection area is therefore $(W-a-b)^2$, while the sampling-domain area is $(W-a)(W-b)$. Hence
+\[
+  P_{\mathrm{1D}}(a,b;W)
+  =
+  1-
+  \frac{(W-a-b)^2}{(W-a)(W-b)}.
+\]
+Combining the two cases gives
+\[
+P_{\mathrm{1D}}(a,b;W)=
+\begin{cases}
+1,&a+b\ge W,\\[4pt]
+1-\dfrac{(W-a-b)^2}{(W-a)(W-b)},&a+b<W.
+\end{cases}
+\]
+The implementation first clips $a$ and $b$ to $[0,W]$, and then evaluates the above formula in vectorized form.
+
+\section{Multidimensional Pair Intersection Probability and Expected Output Density}
+
+\subsection{Intersection Probability Conditional on Side Lengths}
+
+Given side-length vectors for $r\in R$ and $s\in S$,
+\[
+  \boldsymbol\lambda^{(r)}=(\lambda^{(r)}_1,\dots,\lambda^{(r)}_d),
+  \qquad
+  \boldsymbol\lambda^{(s)}=(\lambda^{(s)}_1,\dots,\lambda^{(s)}_d),
+\]
+and assuming independent positions across dimensions, the pairwise intersection probability is the product of the one-dimensional intersection probabilities:
+\[
+  \Prob(r\cap s\ne\varnothing
+  \mid
+  \boldsymbol\lambda^{(r)},\boldsymbol\lambda^{(s)})
+  =
+  \prod_{k=1}^{d}
+  P_{\mathrm{1D}}
+  (\lambda^{(r)}_k,
+   \lambda^{(s)}_k;
+   W_k).
+\]
+
+\subsection{Expectation over the Side-Length Distribution}
+
+Let $p(C)$ denote the probability that a randomly sampled object from $R$ intersects a randomly sampled object from $S$ under coverage $C$. Then
+\[
+  p(C)=
+  \Exp_{\boldsymbol\lambda^{(r)},\boldsymbol\lambda^{(s)}}
+  \left[
+    \prod_{k=1}^{d}
+    P_{\mathrm{1D}}
+    (\lambda^{(r)}_k,
+     \lambda^{(s)}_k;
+     W_k)
+  \right].
+\]
+Because the side-length distribution incorporates the volume distribution, the shape-factor distribution, and truncation, it usually has no simple closed form. Alacarte estimates this expectation using Monte Carlo sampling.
+
+Given $M$ Monte Carlo samples, independently sample one $R$ side-length vector and one $S$ side-length vector for each $j=1,\dots,M$:
+\[
+  \boldsymbol\lambda_{j}^{(R)},
+  \boldsymbol\lambda_{j}^{(S)}.
+\]
+Then
+\[
+  \widehat p(C)
+  =
+  \frac1M\sum_{j=1}^{M}
+  \prod_{k=1}^{d}
+  P_{\mathrm{1D}}
+  (\lambda^{(R)}_{j,k},
+   \lambda^{(S)}_{j,k};
+   W_k).
+\]
+
+\subsection{From Pair Probability to Output Density}
+
+The total number of pairs is $n_Rn_S$. If the marginal intersection probability of each pair is $p(C)$, then the expected join-result size is
+\[
+  \Exp[|\Jset(R,S)|]=n_Rn_Sp(C).
+\]
+Therefore, the expected output density is
+\[
+  \alpha_{\mathrm{exp}}(C)
+  =
+  p(C)\frac{n_Rn_S}{n_R+n_S}.
+\]
+The Monte Carlo estimate is
+\[
+  \widehat\alpha_{\mathrm{exp}}(C)
+  =
+  \widehat p(C)\frac{n_Rn_S}{n_R+n_S}.
+\]
+This is the objective estimator repeatedly invoked during coverage solving.
+
+\section{Coverage Inverse-Problem Solver}
+
+\subsection{Inputs and Outputs}
+
+The coverage solver takes as input
+\[
+  n_R,n_S,\alpha_{\mathrm{out}}^\star,d,
+  \Uset,
+  \text{volume distribution},
+  \mathrm{CV},
+  \sigma_{\mathrm{shape}},
+  M,
+  \text{seed},
+  \tau,
+  I_{\max}.
+\]
+Here $M$ is the number of Monte Carlo samples, $\tau$ is the relative-error tolerance, and $I_{\max}$ is the maximum number of log-space binary-search iterations. The output is
+\[
+  C^*,\quad \text{history},
+\]
+where \code{history} records each attempted coverage value and its estimated output density.
+
+\subsection{Boundary Cases}
+
+\begin{enumerate}
+  \item If $\alpha_{\mathrm{out}}^\star<0$, raise an error.
+  \item If $\alpha_{\mathrm{out}}^\star=0$, directly return
+  \[
+    C^*=0,
+    \qquad
+    \text{history}=\{(0,0)\}.
+  \]
+  \item If $\alpha_{\mathrm{out}}^\star>\alpha_{\max}$, raise an error, where
+  \[
+    \alpha_{\max}=\frac{n_Rn_S}{n_R+n_S}.
+  \]
+\end{enumerate}
+
+\subsection{Initial Guess}
+
+The implementation uses the empirical initial value
+\[
+  C_0=\max(10^{-12},\alpha_{\mathrm{out}}^\star/2).
+\]
+This heuristic is motivated by the small-rectangle regime with $n_R\approx n_S$. In that regime, $\alpha_{\mathrm{out}}$ grows approximately linearly with coverage and can be roughly approximated by $2C$.
+
+The solver then evaluates
+\[
+  a_0=\widehat\alpha_{\mathrm{exp}}(C_0).
+\]
+If
+\[
+  |a_0-\alpha_{\mathrm{out}}^\star|
+  \le
+  \tau\alpha_{\mathrm{out}}^\star,
+\]
+it directly returns $C_0$.
+
+\subsection{Interval Expansion}
+
+If $a_0<\alpha_{\mathrm{out}}^\star$, the current coverage is insufficient, and the solver must find an upper bound. Set
+\[
+  C_{\mathrm{lo}}=C_0,
+  \qquad
+  C_{\mathrm{hi}}=C_0.
+\]
+Then repeatedly update
+\[
+  C_{\mathrm{hi}}\leftarrow2C_{\mathrm{hi}}
+\]
+and estimate $\widehat\alpha_{\mathrm{exp}}(C_{\mathrm{hi}})$ until
+\[
+  \widehat\alpha_{\mathrm{exp}}(C_{\mathrm{hi}})
+  \ge
+  \alpha_{\mathrm{out}}^\star.
+\]
+The implementation allows at most 60 expansion steps. If the target is still not bracketed, it raises an error.
+
+If $a_0>\alpha_{\mathrm{out}}^\star$, the solver uses $\alpha_{\mathrm{exp}}(0)=0$ and directly sets
+\[
+  C_{\mathrm{lo}}=0,
+  \qquad
+  C_{\mathrm{hi}}=C_0.
+\]
+
+\subsection{Log-Space Binary Search}
+
+Because coverage may span several orders of magnitude, binary search in $C$ is less stable than binary search in $\log C$. Given an interval
+\[
+  [C_{\mathrm{lo}},C_{\mathrm{hi}}],
+\]
+each iteration takes the geometric mean
+\[
+  C_{\mathrm{mid}}
+  =
+  \exp\left(
+    \frac{
+      \log(\max(C_{\mathrm{lo}},10^{-15}))
+      +
+      \log C_{\mathrm{hi}}
+    }{2}
+  \right).
+\]
+Then compute
+\[
+  a_{\mathrm{mid}}
+  =
+  \widehat\alpha_{\mathrm{exp}}(C_{\mathrm{mid}}).
+\]
+If the relative error satisfies
+\[
+  |a_{\mathrm{mid}}-\alpha_{\mathrm{out}}^\star|
+  \le
+  \tau\alpha_{\mathrm{out}}^\star,
+\]
+return $C_{\mathrm{mid}}$. Otherwise, update the interval according to monotonicity:
+\[
+\begin{cases}
+C_{\mathrm{lo}}\leftarrow C_{\mathrm{mid}},&a_{\mathrm{mid}}<\alpha_{\mathrm{out}}^\star,\\
+C_{\mathrm{hi}}\leftarrow C_{\mathrm{mid}},&a_{\mathrm{mid}}\ge\alpha_{\mathrm{out}}^\star.
+\end{cases}
+\]
+If the maximum number of iterations is reached without satisfying the tolerance, the solver returns the coverage in the history with the smallest absolute error.
+
+\subsection{Coverage-Solving Pseudocode}
+
+\begin{verbatim}
+Algorithm SolveCoverageForAlpha
+Input:
+  nR, nS, alpha_target, d, universe
+  volume_dist, volume_cv, shape_sigma
+  num_samples, seed, tol_rel, max_iter
+Output:
+  coverage C, tuning history H
+
+1. if alpha_target < 0: raise ValueError
+2. if alpha_target == 0: return 0, [{coverage: 0, alpha_est: 0}]
+3. alpha_max = nR * nS / (nR + nS)
+4. if alpha_target > alpha_max: raise ValueError
+
+5. C0 = max(1e-12, alpha_target / 2)
+6. alpha0 = EstimateAlphaExpected(C0)
+7. H = [{coverage: C0, alpha_est: alpha0}]
+8. if |alpha0 - alpha_target| <= tol_rel * alpha_target:
+       return C0, H
+
+9. if alpha0 < alpha_target:
+       lo = C0
+       hi = C0
+       repeat at most 60 times:
+           hi = 2 * hi
+           alpha_hi = EstimateAlphaExpected(hi)
+           append {hi, alpha_hi} to H
+           if alpha_hi >= alpha_target: break
+           lo = hi
+       if target was not bracketed: raise RuntimeError
+   else:
+       lo = 0
+       hi = C0
+
+10. repeat max_iter times:
+        lo_for_log = max(lo, 1e-15)
+        mid = exp((log(lo_for_log) + log(hi)) / 2)
+        alpha_mid = EstimateAlphaExpected(mid)
+        append {mid, alpha_mid} to H
+        if |alpha_mid - alpha_target| <= tol_rel * alpha_target:
+            return mid, H
+        if alpha_mid < alpha_target:
+            lo = mid
+        else:
+            hi = mid
+
+11. best = entry in H minimizing |alpha_est - alpha_target|
+12. return best.coverage, H
+\end{verbatim}
+
+\section{Expected-Density Estimator}
+
+\subsection{Estimator Procedure}
+
+Given coverage $C$, \code{EstimateAlphaExpected} performs the following steps:
+\begin{enumerate}
+  \item Normalize the universe, and compute each span $W_k$ and the volume $V_{\Uset}$.
+  \item Compute the target average volumes of the two object sets:
+  \[
+    \bar v_R=\frac{C V_{\Uset}}{n_R},
+    \qquad
+    \bar v_S=\frac{C V_{\Uset}}{n_S}.
+  \]
+  \item Use random seed \code{seed} to sample $M$ side-length vectors for $R$; use \code{seed+1} to sample $M$ side-length vectors for $S$.
+  \item For each sample $j$, compute
+  \[
+    q_j=
+    \prod_{k=1}^{d}
+    P_{\mathrm{1D}}
+    (\lambda^{(R)}_{j,k},
+     \lambda^{(S)}_{j,k};W_k).
+  \]
+  \item Compute
+  \[
+    \widehat p(C)=\frac1M\sum_{j=1}^{M}q_j.
+  \]
+  \item Return
+  \[
+    \widehat\alpha_{\mathrm{exp}}(C)
+    =\widehat p(C)\frac{n_Rn_S}{n_R+n_S},
+    \qquad
+    \widehat p(C).
+  \]
+\end{enumerate}
+
+\subsection{Estimator Pseudocode}
+
+\begin{verbatim}
+Algorithm EstimateAlphaExpected
+Input:
+  nR, nS, d, universe, coverage C
+  volume_dist, volume_cv, shape_sigma
+  num_samples M, seed
+Output:
+  alpha_est, p_est
+
+1. U = EnsureUniverse(universe, d)
+2. spans = U[:, 1] - U[:, 0]
+3. U_vol = product(spans)
+4. mean_vol_R = C * U_vol / nR
+5. mean_vol_S = C * U_vol / nS
+
+6. lenR = SampleLengthsFromMean(M, d, U, mean_vol_R,
+                                volume_dist, volume_cv,
+                                shape_sigma, seed)
+7. lenS = SampleLengthsFromMean(M, d, U, mean_vol_S,
+                                volume_dist, volume_cv,
+                                shape_sigma, seed + 1)
+
+8. p = array of ones with length M
+9. for k in 0..d-1:
+       p = p * IntervalOverlapProb(lenR[:, k], lenS[:, k], spans[k])
+
+10. p_est = mean(p)
+11. alpha_est = p_est * nR * nS / (nR + nS)
+12. return alpha_est, p_est
+\end{verbatim}
+
+\section{Final Data Generation Algorithm}
+
+\subsection{Generating a Single BoxSet}
+
+Given the object count $n$, coverage $C$, and distribution parameters, \code{GenerateBoxSet} returns a \code{BoxSet}:
+\[
+  \code{BoxSet}=(\code{lower},\code{upper},\code{universe}).
+\]
+Here
+\[
+  \code{lower},\code{upper}\in\mathbb{R}^{n\times d},
+  \qquad
+  \code{universe}\in\mathbb{R}^{d\times2}.
+\]
+The generation procedure is as follows:
+\begin{enumerate}
+  \item Normalize the universe, and compute the spans and the universe volume.
+  \item Compute the average volume $\bar v=C V_{\Uset}/n$.
+  \item Sample $n$ volumes, shape factors, and side-length vectors.
+  \item For each object and each dimension, sample $q_{i,k}\sim\Uniform(0,1)$.
+  \item Compute
+  \[
+    \ell_{i,k}=u_k^{\min}+q_{i,k}(W_k-\lambda_{i,k}),
+    \qquad
+    u_{i,k}=\ell_{i,k}+\lambda_{i,k}.
+  \]
+  \item Convert the coordinates to the user-specified \dtype, which defaults to \code{np.float32}.
+  \item Apply output-level numerical repair to ensure that, under the specified \dtype,
+  \[
+    \forall i,k:
+    \code{upper}_{i,k}>\code{lower}_{i,k}.
+  \]
+\end{enumerate}
+
+\subsection{Output-Level Numerical Repair}
+
+Internal computations are usually performed in \code{float64}, but the output defaults to \code{float32} to save memory. When boxes are very small, or when the target $\alpha$ is very small, conversion to \code{float32} may produce
+\[
+  \code{upper}_{i,k}=\code{lower}_{i,k},
+\]
+violating the requirement that every half-open interval have positive length. The implementation uses the following repair strategy:
+
+\begin{enumerate}
+  \item Convert the universe to the target \dtype, yielding the lower and upper bounds $l_k$ and $h_k$ in each dimension.
+  \item Cast \code{lower64} and \code{upper64} to the target \dtype.
+  \item Apply boundary clipping:
+  \[
+    \code{lower}\leftarrow\max(\code{lower},l),
+    \qquad
+    \code{upper}\leftarrow\min(\code{upper},h).
+  \]
+  \item Let
+  \[
+    h_k^{-}=\operatorname{nextafter}(h_k,l_k),
+  \]
+  i.e., the largest representable value in the target \dtype that is strictly smaller than $h_k$. Then set
+  \[
+    \code{lower}_{i,k}\leftarrow
+    \min(\code{lower}_{i,k},h_k^{-}).
+  \]
+  This ensures that, starting from the lower endpoint, there still exists a representable value that is larger and directed toward $h_k$.
+  \item For all degenerate positions satisfying $\code{upper}_{i,k}\le\code{lower}_{i,k}$, set
+  \[
+    \code{upper}_{i,k}
+    \leftarrow
+    \operatorname{nextafter}(\code{lower}_{i,k},h_k).
+  \]
+\end{enumerate}
+
+This repair only guarantees representation-level invariants in the output; it does not modify the statistical model used by the coverage solver.
+
+\subsection{Pseudocode for Generating a Single BoxSet}
+
+\begin{verbatim}
+Algorithm GenerateBoxSet
+Input:
+  n, d, universe, coverage C
+  volume_dist, volume_cv, shape_sigma
+  seed, dtype
+Output:
+  BoxSet(lower, upper, universe)
+
+1. U = EnsureUniverse(universe, d)
+2. spans = U[:, 1] - U[:, 0]
+3. U_vol = product(spans)
+4. mean_vol = C * U_vol / n
+5. rng = RandomGenerator(seed)
+
+6. lengths = SampleLengthsFromMean(n, d, U, mean_vol,
+                                   volume_dist, volume_cv,
+                                   shape_sigma, rng)
+
+7. q = rng.random((n, d))
+8. lower64 = U[:, 0] + q * (spans - lengths)
+9. upper64 = lower64 + lengths
+
+10. cast U, lower64, upper64 to dtype
+11. clamp lower and upper to universe bounds
+12. lower = min(lower, nextafter(hi, lo))
+13. for every coordinate where upper <= lower:
+        upper = nextafter(lower, hi)
+14. return BoxSet(lower, upper, U_as_dtype)
+\end{verbatim}
+
+\section{Main Entry-Point Algorithm: Generating $R$ and $S$}
+
+\subsection{Interface Semantics}
+
+The main function can be abstracted as
+\begin{verbatim}
+make_rectangles_R_S(
+    nR: int,
+    nS: int,
+    alpha_out: float,
+    d: int = 2,
+    universe = None,
+    volume_dist = "fixed",
+    volume_cv = 0.25,
+    shape_sigma = 0.0,
+    tune_samples = 200_000,
+    tune_tol_rel = 0.02,
+    tune_max_iter = 30,
+    seed = 0,
+    dtype = np.float32,
+) -> (R: BoxSet, S: BoxSet, info: Dict)
+\end{verbatim}
+
+The parameters are defined as follows.
+
+\begin{longtable}{>{\raggedright\arraybackslash}p{3.5cm}p{10cm}}
+\toprule
+\textbf{Parameter} & \textbf{Meaning} \\
+\midrule
+\endhead
+\code{nR}, \code{nS} & Object counts of the two input sets $R$ and $S$. \\
+\code{alpha\_out} & Target output density $\alpha_{\mathrm{out}}^\star$. \\
+\code{d} & Spatial dimensionality. When $d=2$, the algorithm generates ordinary two-dimensional rectangles; when $d>2$, it generates axis-aligned hyperrectangles. \\
+\code{universe} & Boundary array of shape $(d,2)$; if \code{None}, the default is $[0,1)^d$. \\
+\code{volume\_dist} & Volume distribution: \code{fixed}, \code{exponential}, \code{normal}, or \code{lognormal}. \\
+\code{volume\_cv} & Coefficient of variation of the volume distribution, primarily used for \code{normal} and \code{lognormal}. \\
+\code{shape\_sigma} & Log-normal standard deviation of the shape factors. A value of 0 produces squares or hypercubes; larger values induce stronger aspect-ratio variation. \\
+\code{tune\_samples} & Number of Monte Carlo side-length samples used in coverage tuning. Larger values are more stable but slower. \\
+\code{tune\_tol\_rel} & Relative-error tolerance for the solver; for example, 0.01 means 1\%. \\
+\code{tune\_max\_iter} & Maximum number of log-space binary-search iterations. \\
+\code{seed} & Global random seed, used to derive random streams for tuning, $R$ generation, $S$ generation, and the final reported estimate. \\
+\code{dtype} & Output coordinate precision; the default is \code{np.float32} for memory efficiency. \\
+\bottomrule
+\end{longtable}
+
+\subsection{Random-Seed Splitting}
+
+To ensure reproducibility while avoiding complete overlap between random streams used in different stages, the main entry point uses seed offsets:
+\begin{itemize}
+  \item coverage tuning uses \code{seed + 10000};
+  \item generation of $R$ uses \code{seed + 1};
+  \item generation of $S$ uses \code{seed + 2};
+  \item the final re-estimation of expected alpha reported in \code{info} uses \code{seed + 20000}.
+\end{itemize}
+Thus, the same parameter set and the same seed produce deterministic output, while different stages do not reuse exactly the same random samples.
+
+\subsection{Main Algorithm Pseudocode}
+
+\begin{verbatim}
+Algorithm MakeRectanglesRS
+Input:
+  nR, nS, alpha_out
+  d, universe, volume_dist, volume_cv, shape_sigma
+  tune_samples, tune_tol_rel, tune_max_iter
+  seed, dtype
+Output:
+  R, S, info
+
+1. volume_dist = NormalizeVolumeDist(volume_dist)
+
+2. C, history = SolveCoverageForAlpha(
+       nR, nS, alpha_out, d, universe,
+       volume_dist, volume_cv, shape_sigma,
+       num_samples = tune_samples,
+       seed = seed + 10000,
+       tol_rel = tune_tol_rel,
+       max_iter = tune_max_iter)
+
+3. R = GenerateBoxSet(
+       nR, d, universe, C,
+       volume_dist, volume_cv, shape_sigma,
+       seed = seed + 1,
+       dtype = dtype)
+
+4. S = GenerateBoxSet(
+       nS, d, universe, C,
+       volume_dist, volume_cv, shape_sigma,
+       seed = seed + 2,
+       dtype = dtype)
+
+5. alpha_est, p_est = EstimateAlphaExpected(
+       nR, nS, d, universe, C,
+       volume_dist, volume_cv, shape_sigma,
+       num_samples = min(200000, tune_samples),
+       seed = seed + 20000)
+
+6. info = {
+       "coverage": C,
+       "alpha_target": alpha_out,
+       "alpha_expected_est": alpha_est,
+       "pair_intersection_prob_est": p_est,
+       "tune_history": history,
+       "params": input parameter snapshot
+   }
+
+7. return R, S, info
+\end{verbatim}
+
+\section{BoxSet Data Structure and Output Metadata}
+
+\subsection{BoxSet}
+
+\code{BoxSet} is an immutable-style data container with the following core fields:
+\begin{itemize}
+  \item \code{lower}: an array of shape $(n,d)$, whose $i$-th row is the lower corner of the $i$-th box;
+  \item \code{upper}: an array of shape $(n,d)$, whose $i$-th row is the upper corner of the $i$-th box;
+  \item \code{universe}: an array of shape $(d,2)$ storing the universe bounds of each dimension.
+\end{itemize}
+Common derived properties and methods include:
+\begin{itemize}
+  \item \code{n}: the number of objects;
+  \item \code{d}: the dimensionality;
+  \item \code{as\_array()}: returns an array of shape $(n,2d)$, concatenated as $[L_0,\dots,L_{d-1},U_0,\dots,U_{d-1}]$.
+\end{itemize}
+
+\subsection{The \code{info} Dictionary}
+
+The third object returned by the main function, \code{info}, supports auditing and reproducibility.
+
+\begin{longtable}{>{\raggedright\arraybackslash}p{5.8cm}p{2.5cm}p{6.1cm}}
+\toprule
+\textbf{Field} & \textbf{Symbol} & \textbf{Meaning} \\
+\midrule
+\endhead
+\code{coverage} & $C^*$ & Coverage obtained by the solver. \\
+\code{alpha\_target} & $\alpha_{\mathrm{out}}^\star$ & User-specified target output density. \\
+\code{alpha\_expected\_est} & $\widehat\alpha_{\mathrm{exp}}(C^*)$ & Re-estimated expected output density under the final coverage. \\
+\code{pair\_intersection\_prob\_est} & $\widehat p(C^*)$ & Estimated random-pair intersection probability under the final coverage. \\
+\code{tune\_history} & --- & All attempted $C$ values and estimated alpha values during coverage solving. \\
+\code{params} & --- & Snapshot of the main input parameters, such as $n_R$, $n_S$, $d$, $\Uset$, \code{volume\_dist}, \code{volume\_cv}, \code{shape\_sigma}, \code{seed}, and \dtype. \\
+\bottomrule
+\end{longtable}
+
+\section{Sampling-Based Estimation of Realized Alpha}
+
+\subsection{Why Realized-Alpha Estimation Is Needed}
+
+The main algorithm guarantees
+\[
+  \Exp[\alpha_{\mathrm{out}}]\approx \alpha_{\mathrm{out}}^\star,
+\]
+whereas the actual value for one concrete generated pair of datasets $R,S$,
+\[
+  \alpha_{\mathrm{realized}}
+  =
+  \frac{|\Jset(R,S)|}{n_R+n_S},
+\]
+will fluctuate randomly. Computing $|\Jset(R,S)|$ exactly may require checking $n_Rn_S$ pairs in the worst case, which can be expensive. Therefore, the implementation provides a pair-sampling estimator.
+
+\subsection{Pair-Sampling Method}
+
+Given $P$ samples, repeat the following sampling procedure:
+\[
+  i_t\sim\Uniform\{0,\dots,n_R-1\},
+  \qquad
+  j_t\sim\Uniform\{0,\dots,n_S-1\},
+  \qquad t=1,\dots,P.
+\]
+Check whether the sampled pair $(r_{i_t},s_{j_t})$ intersects. If the number of hits is $H$, then
+\[
+  \widehat p_{\mathrm{realized}}=\frac{H}{P},
+\]
+and the realized output density is estimated as
+\[
+  \widehat\alpha_{\mathrm{realized}}
+  =
+  \widehat p_{\mathrm{realized}}
+  \frac{n_Rn_S}{n_R+n_S}.
+\]
+
+The intersection test is vectorized as
+\[
+  \text{hit}(r,s)
+  =
+  \mathbf{1}\left[\forall k:
+    \max(\ell^{(r)}_k,\ell^{(s)}_k)<
+    \min(u^{(r)}_k,u^{(s)}_k)
+  \right].
+\]
+
+\subsection{Pair-Sampling Pseudocode}
+
+\begin{verbatim}
+Algorithm EstimateAlphaByPairSampling
+Input:
+  R, S, num_pairs P, seed
+Output:
+  alpha_hat, p_hat
+
+1. rng = RandomGenerator(seed)
+2. idxR = rng.integers(0, R.n, size=P)
+3. idxS = rng.integers(0, S.n, size=P)
+4. lower_max = maximum(R.lower[idxR], S.lower[idxS])
+5. upper_min = minimum(R.upper[idxR], S.upper[idxS])
+6. hits = count rows where all(lower_max < upper_min)
+7. p_hat = hits / P
+8. alpha_hat = p_hat * R.n * S.n / (R.n + S.n)
+9. return alpha_hat, p_hat
+\end{verbatim}
+
+When the true pair intersection probability is very small, e.g., $p\approx O(1/N)$ or smaller, a large number of pair samples is required to observe enough hits. Otherwise, the realized-alpha estimator may have high variance.
+
+\section{Complexity Analysis}
+
+\subsection{Notation}
+
+Let
+\begin{itemize}
+  \item $M=$ \code{tune\_samples}, the number of Monte Carlo side-length samples used in each estimate of $\alpha_{\mathrm{exp}}(C)$;
+  \item $B=$ the number of interval-expansion steps;
+  \item $I=$ the number of log-space binary-search iterations;
+  \item $N=n_R+n_S$;
+  \item $P=$ the number of pair samples used for realized-alpha estimation.
+\end{itemize}
+
+\subsection{Coverage Tuning}
+
+Each call to \code{EstimateAlphaExpected} samples $M$ side-length vectors for $R$ and $M$ side-length vectors for $S$, and computes the product of one-dimensional intersection probabilities across $d$ dimensions. Therefore, its time complexity is
+\[
+  O(Md).
+\]
+If coverage is evaluated $B+I+1$ times in total, the overall time complexity of coverage tuning is
+\[
+  O((B+I+1)Md).
+\]
+The memory complexity is dominated by the two sets of sampled side-length vectors:
+\[
+  O(Md).
+\]
+
+\subsection{Final Data Generation}
+
+Generating $R$ and $S$ takes time
+\[
+  O((n_R+n_S)d)=O(Nd),
+\]
+and storing the output lower and upper coordinates requires memory
+\[
+  O(Nd).
+\]
+When \code{float32} is used, each coordinate requires 4 bytes; each box contains $2d$ coordinates, so the coordinate matrices alone occupy approximately
+\[
+  8Nd\ \text{bytes},
+\]
+where $N=n_R+n_S$. With \code{float64}, this cost doubles.
+
+\subsection{Realized-Alpha Pair Sampling}
+
+Sampling $P$ pairs and checking $d$-dimensional intersections requires time
+\[
+  O(Pd).
+\]
+If all sampled indices and intermediate matrices are stored in a single vectorized batch, the memory complexity is
+\[
+  O(Pd).
+\]
+In large-scale applications, pair sampling can be performed in batches to reduce peak memory usage.
+
+\section{Statistical Properties, Error Sources, and Limitations}
+
+\subsection{Expected Control and Realized Fluctuation}
+
+The objective solved by Alacarte is
+\[
+  \alpha_{\mathrm{exp}}(C^*)
+  \approx
+  \alpha_{\mathrm{out}}^\star.
+\]
+The actually generated $R,S$ are random samples, so
+\[
+  \alpha_{\mathrm{realized}}
+\]
+will fluctuate around the expectation. As the data size grows and the target output density increases, the realized alpha is typically more stable. However, in regimes with extremely small $p$, extremely small $\alpha$, or high-dimensional sparsity, random fluctuations may be more pronounced.
+
+\subsection{Monte Carlo Error}
+
+Coverage solving relies on the Monte Carlo estimate
+\[
+  \widehat p(C)
+  =
+  \frac1M\sum_{j=1}^{M}q_j.
+\]
+This estimator has sampling error. Increasing \code{tune\_samples} reduces the error but increases tuning time linearly. If \code{tune\_tol\_rel} is too small while \code{tune\_samples} is insufficient, the solver may be affected by estimator noise, and the alpha estimates in the history need not be strictly monotone.
+
+\subsection{Monotonicity and Approximation}
+
+In principle, increasing coverage usually increases box side lengths, thereby increasing the pairwise intersection probability. Hence $\alpha_{\mathrm{exp}}(C)$ is approximately monotone over typical parameter regimes. The implementation exploits this property for bracketing and binary search.
+
+However, strict monotonicity may be affected by the following factors:
+\begin{itemize}
+  \item Monte Carlo noise;
+  \item saturation caused by side-length truncation;
+  \item small mean shifts introduced by truncating the normal volume distribution;
+  \item extreme shape factors that cause some dimensions to approach the universe span earlier than others.
+\end{itemize}
+For robustness, the implementation returns as soon as the tolerance is met; otherwise, it returns the history entry closest to the target.
+
+\subsection{Saturation Regime}
+
+When coverage is large, many boxes have some side lengths close to $W_k$, the one-dimensional intersection probability approaches 1, and the multidimensional pair intersection probability may also approach 1. In this regime,
+\[
+  \alpha_{\mathrm{exp}}(C)
+  \to
+  \alpha_{\max}
+  =
+  \frac{n_Rn_S}{n_R+n_S}.
+\]
+If the target is close to this upper bound, the marginal effect of coverage on alpha becomes small, and the solver may require more Monte Carlo samples to distinguish errors stably.
+
+\subsection{Modeling Assumptions}
+
+The default Alacarte model assumes that:
+\begin{enumerate}
+  \item object positions are independent, and each lower corner is uniformly distributed over its feasible region;
+  \item $R$ and $S$ use the same coverage, although $n_R$ and $n_S$ may differ, so the average per-object volumes are $CV_{\Uset}/n_R$ and $CV_{\Uset}/n_S$, respectively;
+  \item volumes, shape factors, and positions are sampled independently according to the generation pipeline;
+  \item the model does not simulate spatial clustering, correlations, non-uniform density hotspots, or real-map topology.
+\end{enumerate}
+Accordingly, the algorithm is well suited for generating controllable, reproducible synthetic benchmark data with tunable geometric difficulty. Simulating real data distributions would require additional non-uniform position models or correlation models.
+
+\section{Recommended Usage Workflow}
+
+\subsection{Basic Workflow}
+
+\begin{enumerate}
+  \item Select the input sizes $n_R,n_S$ and the dimensionality $d$.
+  \item Choose a target output density $\alpha_{\mathrm{out}}^\star$ and verify that it does not exceed
+  \[
+    \frac{n_Rn_S}{n_R+n_S}.
+  \]
+  \item Choose a volume distribution:
+  \begin{itemize}
+    \item \code{fixed}: the most stable option, suitable for initial baseline experiments;
+    \item \code{normal}: introduces mild volume perturbation and requires \code{volume\_cv};
+    \item \code{lognormal}: more appropriate for modeling right-skewed volume distributions;
+    \item \code{exponential}: produces stronger variation.
+  \end{itemize}
+  \item Choose \code{shape\_sigma}:
+  \begin{itemize}
+    \item $0$: squares or hypercubes;
+    \item $0.3$ to $0.8$: common aspect-ratio variation;
+    \item larger values: more extreme aspect ratios, requiring attention to side-length truncation and high-dimensional sparsity.
+  \end{itemize}
+  \item Use a sufficiently large \code{tune\_samples} value for coverage tuning.
+  \item Inspect \code{info} and check whether \code{alpha\_expected\_est} is close to the target.
+  \item If needed, use \code{estimate\_alpha\_by\_pair\_sampling} to estimate the realized alpha of the concrete dataset.
+\end{enumerate}
+
+\subsection{Python Usage Example}
+
+\begin{verbatim}
+import numpy as np
+import alacarte_rectgen as ar
+
+N_R, N_S = 500_000, 500_000
+TARGET_ALPHA = 10.0
+
+R, S, info = ar.make_rectangles_R_S(
+    nR=N_R,
+    nS=N_S,
+    alpha_out=TARGET_ALPHA,
+    d=2,
+    universe=None,
+    volume_dist="normal",
+    volume_cv=0.25,
+    shape_sigma=0.5,
+    seed=42,
+    tune_tol_rel=0.01,
+    dtype=np.float32,
+)
+
+print(R.lower.shape, R.upper.shape)
+print(info["coverage"])
+print(info["alpha_target"], info["alpha_expected_est"])
+print(info["pair_intersection_prob_est"])
+
+alpha_hat, p_hat = ar.estimate_alpha_by_pair_sampling(
+    R, S, num_pairs=2_000_000, seed=0
+)
+print(alpha_hat, p_hat)
+\end{verbatim}
+
+\section{Implementation Checklist}
+
+When reimplementing Alacarte from this document, the following invariants should be checked carefully.
+
+\subsection{Input Checks}
+
+\begin{itemize}
+  \item \code{universe} must have shape $(d,2)$.
+  \item Each dimension must satisfy $u_k^{\max}>u_k^{\min}$.
+  \item \code{volume\_dist} must be one of \code{fixed/exponential/normal/lognormal}.
+  \item $\alpha_{\mathrm{out}}^\star$ must be non-negative and must not exceed $n_Rn_S/(n_R+n_S)$.
+\end{itemize}
+
+\subsection{Geometric Invariants}
+
+\begin{itemize}
+  \item The output must satisfy $\code{lower}.\code{shape}=\code{upper}.\code{shape}=(n,d)$.
+  \item The output must satisfy $\forall i,k:\code{lower}_{i,k}<\code{upper}_{i,k}$.
+  \item The output must satisfy $u_k^{\min}\le\code{lower}_{i,k}<\code{upper}_{i,k}\le u_k^{\max}$.
+  \item \code{as\_array()} should return shape $(n,2d)$, with all lower coordinates followed by all upper coordinates.
+\end{itemize}
+
+\subsection{Probability and Solver Invariants}
+
+\begin{itemize}
+  \item The output of \code{interval\_overlap\_prob} should lie in $[0,1]$.
+  \item If $a+b\ge W$, the one-dimensional intersection probability should be $1$.
+  \item \code{estimate\_alpha\_expected} should return
+  \[
+    \code{alpha\_est}
+    =
+    \code{p\_est}\cdot\frac{n_Rn_S}{n_R+n_S}.
+  \]
+  \item The coverage solver's history should record all attempted points, facilitating reproducibility and debugging.
+  \item With all input parameters and the seed fixed, the output should be reproducible.
+\end{itemize}
+
+\section{Relationship to Benchmark Design}
+
+The value of Alacarte lies in separating the ``geometric appearance parameters'' of a synthetic spatial-join benchmark from the ``join-load parameter'':
+\begin{itemize}
+  \item $n_R,n_S,d$ control the input scale and dimensionality;
+  \item \code{volume\_dist} and \code{shape\_sigma} control the diversity of individual object shapes;
+  \item $\alpha_{\mathrm{out}}^\star$ directly controls the join-output load;
+  \item coverage $C$ is an automatically solved internal variable, not an external parameter that the user must tune manually.
+\end{itemize}
+This enables experimenters to compare different spatial-join algorithms more fairly under the same input sizes and the same target output density, without manually and repeatedly tuning rectangle sizes.
+
+\section{Summary}
+
+The Alacarte rectangle synthetic data generation algorithm can be summarized as the following closed loop:
+\begin{enumerate}
+  \item define the benchmark load by the target output density $\alpha_{\mathrm{out}}^\star$;
+  \item represent the average geometric scale of objects by the coverage parameter $C$;
+  \item given $C$, define the random box distribution via the volume distribution, shape factors, and the uniform position model;
+  \item estimate $p(C)$ using the closed-form one-dimensional interval intersection formula and Monte Carlo sampling;
+  \item convert $p(C)$ into the expected output density $\alpha_{\mathrm{exp}}(C)$;
+  \item solve for $C^*$ using bracketing and log-space binary search;
+  \item generate $R,S$ under $C^*$ and output reproducible metadata;
+  \item if needed, estimate realized alpha by pair sampling.
+\end{enumerate}
+
+The algorithm's main advantage is that it avoids enumerating $R\times S$ and instead performs Monte Carlo tuning at the level of side-length distributions. Consequently, it can scale to very large input sizes while retaining audit information such as the seed, coverage, tuning history, and estimated probabilities, making it suitable for rigorous benchmark experiments.
+
+\appendix
+
+\section{Summary of Function-Level Pseudocode}
+
+\subsection{SampleVolumes}
+
+\begin{verbatim}
+Algorithm SampleVolumes
+Input: n, mean_vol, dist, rng, cv
+Output: volumes
+
+1. if mean_vol <= 0:
+       return array filled with 1e-18
+2. if dist == "fixed":
+       return array filled with mean_vol
+3. if dist == "exponential":
+       return rng.exponential(scale=mean_vol, size=n)
+4. if dist == "normal":
+       sigma = cv * mean_vol
+       vols = rng.normal(loc=mean_vol, scale=sigma, size=n)
+       return maximum(vols, mean_vol * 1e-12)
+5. if dist == "lognormal":
+       sigma = sqrt(log(1 + cv^2))
+       mu = log(mean_vol) - 0.5 * sigma^2
+       return rng.lognormal(mean=mu, sigma=sigma, size=n)
+6. otherwise raise ValueError
+\end{verbatim}
+
+\subsection{SampleShapeFactors}
+
+\begin{verbatim}
+Algorithm SampleShapeFactors
+Input: n, d, shape_sigma, rng
+Output: g of shape (n, d)
+
+1. if shape_sigma <= 0:
+       return ones((n, d))
+2. z = rng.normal(0, shape_sigma, size=(n, d))
+3. g = exp(z)
+4. row_geom_mean = product(g, axis=1)^(1/d)
+5. g = g / row_geom_mean
+6. return g
+\end{verbatim}
+
+\subsection{SampleLengthsFromMean}
+
+\begin{verbatim}
+Algorithm SampleLengthsFromMean
+Input:
+  n_samples, d, universe, mean_vol
+  volume_dist, volume_cv, shape_sigma, rng
+Output:
+  lengths of shape (n_samples, d)
+
+1. spans = universe[:, 1] - universe[:, 0]
+2. vols = SampleVolumes(n_samples, mean_vol, volume_dist, rng, volume_cv)
+3. g = SampleShapeFactors(n_samples, d, shape_sigma, rng)
+4. base = vols^(1/d)
+5. lengths = base[:, None] * g
+6. lengths = minimum(lengths, spans * (1 - 1e-12))
+7. return lengths
+\end{verbatim}
+
+\subsection{IntervalOverlapProb}
+
+\begin{verbatim}
+Algorithm IntervalOverlapProb
+Input: a, b, W
+Output: p
+
+1. a = clip(a, 0, W)
+2. b = clip(b, 0, W)
+3. c = W - (a + b)
+4. p = ones_like(broadcast(a, b))
+5. mask = c > 0
+6. for entries where mask is true:
+       denom = (W - a) * (W - b)
+       p = 1 - c^2 / denom
+7. return p
+\end{verbatim}
+
+\section{Source Code and Documentation Links}
+
+\begin{itemize}
+  \item Alacarte repository: \url{https://github.com/DANNHIROAKI/Alacarte}
+  \item Alacarte specification document: \url{https://raw.githubusercontent.com/DANNHIROAKI/Alacarte/main/README.md}
+  \item Alacarte single-file implementation: \url{https://raw.githubusercontent.com/DANNHIROAKI/Alacarte/main/alacarte_rectgen.py}
+  \item Alacarte-Rectgen repository: \url{https://github.com/DANNHIROAKI/Alacarte-Rectgen}
+  \item Alacarte-Rectgen README: \url{https://raw.githubusercontent.com/DANNHIROAKI/Alacarte-Rectgen/main/README.md}
+  \item Alacarte-Rectgen core implementation: \url{https://raw.githubusercontent.com/DANNHIROAKI/Alacarte-Rectgen/main/src/alacarte_rectgen/core.py}
+\end{itemize}
+
+\end{document}

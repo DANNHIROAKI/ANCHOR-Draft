@@ -1,0 +1,678 @@
+\documentclass[11pt]{article}
+
+\usepackage[a4paper,margin=2.5cm]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage{amsmath,amssymb,amsthm,mathtools}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{etoolbox}
+\usepackage{xcolor}
+\usepackage{hyperref}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue!60!black,
+  citecolor=blue!60!black,
+  urlcolor=blue!60!black
+}
+
+\floatname{algorithm}{Algorithm}
+\algrenewcommand\algorithmicrequire{\textbf{Input:}}
+\algrenewcommand\algorithmicensure{\textbf{Output:}}
+\algrenewcommand\algorithmiccomment[1]{\hfill\(\triangleright\) #1}
+\AtBeginEnvironment{algorithmic}{\footnotesize}
+
+\newtheorem{lemma}{Lemma}[section]
+\newtheorem{theorem}{Theorem}[section]
+\newtheorem{remark}{Remark}[section]
+
+\newcommand{\Rc}{R_c}
+\newcommand{\Rbar}{R_{\bar c}}
+\newcommand{\Start}{\mathrm{START}}
+\newcommand{\End}{\mathrm{END}}
+\newcommand{\id}{\mathrm{id}}
+\newcommand{\idmin}{\id_{\min}}
+\newcommand{\idmax}{\id_{\max}}
+\newcommand{\proj}[1]{{#1}^{\downarrow}}
+\newcommand{\J}{\mathcal J}
+\newcommand{\Bcal}{\mathcal B}
+\newcommand{\Ecal}{\mathcal E}
+\newcommand{\iid}{\mathrm{i.i.d.}}
+
+\title{\textbf{SweepRT: A Two-Pass Count/Sample Algorithm Based on Plane Sweep and Range Trees}}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+This document presents the pure two-pass version of \textbf{SweepRT}. The goal is to directly generate \(\iid\), uniform samples with replacement from the intersection-join result between two collections of \(d\)-dimensional axis-aligned half-open boxes. SweepRT uses plane sweep to decompose the global join result, without duplication, into START-event blocks, and employs dynamic range trees to support exact counting for each event block and uniform sampling within the block. The algorithm consists of only two passes: the first pass is a pure \textsc{Count} pass, which computes only the weight \(w_i\) of each event block; the second pass is a pure \textsc{Sample} pass, which performs within-block sampling only for event blocks assigned to output positions. This document does not include any prefetching mechanism, cache budget, budget heap, residual refill procedure, or prefetch-scoring mechanism.
+\end{abstract}
+
+\section{Problem Definition}
+
+Let two collections of \(d\)-dimensional axis-aligned half-open boxes be given by
+\[
+\Rc=\{r_{c,1},\ldots,r_{c,n_c}\},\qquad
+\Rbar=\{r_{\bar c,1},\ldots,r_{\bar c,n_{\bar c}}\}.
+\]
+Each box is written as
+\[
+ r=\prod_{k=1}^{d}[L_k(r),R_k(r)),\qquad L_k(r)<R_k(r).
+\]
+Under half-open semantics, two boxes intersect if and only if
+\[
+ r\cap s\neq\varnothing
+ \iff
+ \forall k\in[d],\quad L_k(r)<R_k(s)\ \wedge\ L_k(s)<R_k(r).
+\]
+The strict inequalities exclude boundary-touching cases. For example, if \(R_k(r)=L_k(s)\), then the two boxes do not intersect in dimension \(k\).
+
+The target join set is the set of cross-collection intersecting pairs with a fixed output orientation:
+\[
+\J=\{(r_c,r_{\bar c})\mid r_c\in\Rc,\ r_{\bar c}\in\Rbar,
+      \ r_c\cap r_{\bar c}\neq\varnothing\}.
+\]
+Given a sample size \(t\ge 1\), SweepRT outputs
+\[
+ Z_1,\ldots,Z_t\in\J
+\]
+such that
+\[
+ \Pr[Z_j=P]=\frac1{|\J|}\quad(\forall P\in\J),
+ \qquad Z_1,\ldots,Z_t\text{ are mutually independent}.
+\]
+If \(|\J|=0\), the algorithm returns the empty sequence.
+
+Throughout this document, every input box is assumed to have a globally unique object id. If ids are unique within each side but may be duplicated across the two sides, one may use \((\text{side},\id)\) as a globally unique key.
+
+\section{Plane-Sweep Event-Block Decomposition}
+
+\subsection{Event Order}
+
+Fix dimension \(1\) as the sweep dimension. For each box \(r\), define two events:
+\[
+ \Start(r):x=L_1(r),\qquad \End(r):x=R_1(r).
+\]
+All events are sorted according to the total order \(\prec\):
+\begin{enumerate}[leftmargin=2em]
+  \item an event with a smaller coordinate comes first;
+  \item if two events have the same coordinate, then an \(\End\) event strictly precedes a \(\Start\) event;
+  \item if both the coordinate and the event type are identical, ties are broken by increasing globally unique object id.
+\end{enumerate}
+The second rule is consistent with half-open semantics: if \(R_1(r)=L_1(s)\), then \(\End(r)\) is processed before \(\Start(s)\), and hence boxes that only touch at the boundary are never simultaneously present in the active candidate set.
+
+\subsection{Active Sets and START-Event Blocks}
+
+During the sweep, two active sets are maintained:
+\[
+ A_c\subseteq\Rc,
+ \qquad
+ A_{\bar c}\subseteq\Rbar.
+\]
+The event-processing rules are as follows. Upon encountering \(\End(r)\), remove \(r\) from the active set of its own side. Upon encountering \(\Start(q)\), first process the event block associated with \(q\) against the active set on the opposite side, and then insert \(q\) into the active set of its own side.
+
+When \(\Start(q)\) is processed, any active box \(s\) from the opposite side already satisfies intersection in dimension \(1\):
+\[
+ L_1(s)<R_1(q),\qquad L_1(q)<R_1(s).
+\]
+Therefore, at the event, only the projected intersection over the remaining dimensions \(2,\ldots,d\) needs to be tested. Let the projection dimension be
+\[
+ h=d-1,
+\]
+and define, for any box \(r\),
+\[
+ \proj r=\prod_{k=2}^{d}[L_k(r),R_k(r)).
+\]
+Let \(e_i=\Start(q_i)\) be the \(i\)-th START event in sweep order. Its corresponding partner set is defined as
+\[
+K_i=
+\begin{cases}
+\{s\in A_{\bar c}\mid \proj{q_i}\cap\proj{s}\neq\varnothing\}, & q_i\in\Rc,\\[2mm]
+\{s\in A_c\mid \proj{s}\cap\proj{q_i}\neq\varnothing\}, & q_i\in\Rbar.
+\end{cases}
+\]
+To ensure that the output orientation is always \((r_c,r_{\bar c})\), define the mapping
+\[
+\Phi_i(s)=
+\begin{cases}
+(q_i,s), & q_i\in\Rc,\\
+(s,q_i), & q_i\in\Rbar.
+\end{cases}
+\]
+The event block is
+\[
+ J_i=\{\Phi_i(s)\mid s\in K_i\},
+ \qquad
+ w_i=|J_i|=|K_i|.
+\]
+
+\subsection{Disjoint Decomposition}
+
+Plane sweep decomposes the entire join result into disjoint START-event blocks:
+\[
+ \J=\biguplus_{i=1}^{M}J_i,
+ \qquad
+ |\J|=\sum_{i=1}^{M}w_i,
+\]
+where \(M=n_c+n_{\bar c}\) is the number of START events. Any intersecting pair \((r_c,r_{\bar c})\) is discovered only at the later of the two START events: at the earlier START event, the other box has not yet entered the active set; at the later START event, the earlier box remains active if the two boxes intersect. Therefore, the event blocks are mutually disjoint and together cover all of \(\J\).
+
+\section{Range Trees as Event-Block Counters and Samplers}
+
+\subsection{Lifting Projected Boxes to \texorpdfstring{\(2h\)}{2h}-Dimensional Points}
+
+Re-index the projected dimensions as \(j=1,\ldots,h\), corresponding to the original dimension \(j+1\):
+\[
+ L'_j(r)=L_{j+1}(r),
+ \qquad
+ R'_j(r)=R_{j+1}(r).
+\]
+For any active box \(s\), construct the \(D=2h\)-dimensional point
+\[
+ p(s)=\bigl(L'_1(s),\ldots,L'_h(s),R'_1(s),\ldots,R'_h(s)\bigr)\in\mathbb R^{2h}.
+\]
+The point \(p(s)\) carries the object id of \(s\), which is used to recover the partner identity after sampling.
+
+\subsection{Converting a START Box into an Orthogonal Range}
+
+For an event box \(q\), define the \(D=2h\)-dimensional orthogonal range
+\[
+Q(q)=
+\left(\prod_{j=1}^{h}(-\infty,R'_j(q))\right)
+\times
+\left(\prod_{j=1}^{h}(L'_j(q),+\infty)\right).
+\]
+Then
+\[
+ \proj q\cap\proj s\neq\varnothing
+ \iff
+ p(s)\in Q(q).
+\]
+The reason is that projected half-open-box intersection in each dimension is equivalent to
+\[
+ L'_j(s)<R'_j(q)
+ \quad\text{and}\quad
+ L'_j(q)<R'_j(s),
+\]
+which is precisely the condition that the first \(h\) coordinates and the last \(h\) coordinates of \(p(s)\) lie in the corresponding open intervals above.
+
+\subsection{Strict Boundaries and Repeated Coordinates}
+
+To implement strict inequalities and handle repeated coordinates, the range tree uses lexicographic keys internally:
+\[
+ \kappa(x,p)=(x,\id(p)).
+\]
+Introduce sentinel ids \(\idmin=0\) and \(\idmax=+\infty\). Every real id satisfies
+\[
+ \idmin<\id(p)<\idmax.
+\]
+Thus,
+\[
+ x<b \iff \kappa(x,p)<(b,\idmin),
+ \qquad
+ x>a \iff \kappa(x,p)>(a,\idmax).
+\]
+This ensures that points whose coordinates are exactly equal to an open boundary are not incorrectly included among the counting or sampling candidates.
+
+\subsection{Two-Sided Dynamic Range Trees}
+
+SweepRT maintains two dynamic \(D\)-dimensional range trees:
+\begin{itemize}[leftmargin=2em]
+  \item \(T_c\), which stores the points \(p(r_c)\) corresponding to currently active boxes in \(\Rc\);
+  \item \(T_{\bar c}\), which stores the points \(p(r_{\bar c})\) corresponding to currently active boxes in \(\Rbar\).
+\end{itemize}
+During event processing, \(\End(r)\) triggers deletion of \(p(r)\) from the tree of its own side; \(\Start(q_i)\) first triggers a range query \(Q(q_i)\) on the opposite-side tree, and then inserts \(p(q_i)\) into the tree of its own side.
+
+\section{Count and Sample Operations in a Range Tree}
+
+\subsection{Terminal-Block Decomposition}
+
+For an active point set \(P\) and a query range \(Q\), the range tree recursively descends and returns a collection of disjoint terminal blocks:
+\[
+ P\cap Q=\biguplus_{b\in\Bcal(Q)}P(b).
+\]
+Each terminal block \(b\) corresponds to a data structure that can report the number of active points in the block and supports selecting a point by random rank. Let
+\[
+ \omega_b=|P(b)|,
+ \qquad
+ W_Q=\sum_{b\in\Bcal(Q)}\omega_b=|P\cap Q|.
+\]
+In the first pass, \(W_Q\) is returned as the event-block weight. In the second pass, \(\omega_b/W_Q\) is used as the probability of selecting terminal block \(b\) during within-block sampling.
+
+\subsection{Pseudocode for Count and Sample}
+
+\begin{algorithm}[t]
+\caption{Local Count and Sample in a Range Tree}
+\label{alg:rt-count-sample}
+\begin{algorithmic}[1]
+\Function{RT-Count}{$T,Q$}
+    \State $\Bcal_Q \gets \Call{TerminalBlocks}{T,Q}$
+    \State $W_Q\gets 0$
+    \ForAll{$b\in\Bcal_Q$}
+        \State $\omega_b\gets$ number of active points in block $b$
+        \State $W_Q\gets W_Q+\omega_b$
+    \EndFor
+    \State \Return $W_Q$
+\EndFunction
+\Statex
+\Function{RT-Sample}{$T,Q,k$}
+    \If{$k=0$}
+        \State \Return empty list
+    \EndIf
+    \State $\Bcal_Q \gets \Call{TerminalBlocks}{T,Q}$
+    \ForAll{$b\in\Bcal_Q$}
+        \State $\omega_b\gets$ number of active points in block $b$
+    \EndFor
+    \State $W_Q\gets\sum_{b\in\Bcal_Q}\omega_b$
+    \State \textbf{assert} $W_Q>0$
+    \State build a discrete sampler over blocks $b$ with probability $\omega_b/W_Q$
+    \State $\textit{out}\gets[\,]$
+    \For{$a=1$ to $k$}
+        \State draw a block $b$ independently using the block sampler
+        \State draw one active point uniformly from $P(b)$ by a random rank
+        \State append the corresponding object id to $\textit{out}$
+    \EndFor
+    \State \Return $\textit{out}$
+\EndFunction
+\end{algorithmic}
+\end{algorithm}
+
+For any point \(p\in P\cap Q\), the probability of hitting \(p\) in one draw is
+\[
+ \Pr[p]
+ =\frac{\omega_{b(p)}}{W_Q}\cdot\frac1{\omega_{b(p)}}
+ =\frac1{W_Q},
+\]
+where \(b(p)\) is the unique terminal block containing \(p\). Since each sample position independently draws a block and then independently samples within that block, the output is an \(\iid\), uniform sample with replacement from \(P\cap Q\).
+
+\section{The SweepRT Main Algorithm}
+
+\subsection{Input, Output, and Data Objects}
+
+\textbf{Input:}
+\[
+ \Rc,\Rbar,\quad t,\quad \texttt{master\_seed}.
+\]
+Here \(t\) is the output sample size, and \texttt{master\_seed} is used to derive independent random streams for position assignment and within-block sampling.
+
+\textbf{Output:} \(Z[1..t]\), i.e., \(\iid\), uniform samples with replacement from \(\J\). If \(\J=\varnothing\), the algorithm returns the empty sequence.
+
+For each START event \(e_i=\Start(q_i)\), the algorithm stores only the following objects:
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+Symbol or array & Meaning \\
+\midrule
+\(w_i\) & Event-block weight \(|K_i|\) obtained in the first pass \\
+\(L_i\) & List of output positions assigned to event \(i\) in the planning stage \\
+\bottomrule
+\end{tabular}
+\end{center}
+The algorithm has no prefetched sample list, cache, budget parameter, heap, or residual list.
+
+\subsection{Auxiliary Functions}
+
+\begin{algorithm}[t]
+\caption{Auxiliary Functions for SweepRT}
+\label{alg:helpers}
+\begin{algorithmic}[1]
+\Function{Opp-Tree}{$q,T_c,T_{\bar c}$}
+    \If{$q\in\Rc$} \State \Return $T_{\bar c}$
+    \Else \State \Return $T_c$
+    \EndIf
+\EndFunction
+\Statex
+\Function{Own-Tree}{$q,T_c,T_{\bar c}$}
+    \If{$q\in\Rc$} \State \Return $T_c$
+    \Else \State \Return $T_{\bar c}$
+    \EndIf
+\EndFunction
+\Statex
+\Function{Make-Range}{$q$}
+    \State \Return $\prod_{j=1}^{h}(-\infty,R'_j(q))\times\prod_{j=1}^{h}(L'_j(q),+\infty)$
+\EndFunction
+\Statex
+\Function{Map-Pair}{$q,s$}
+    \If{$q\in\Rc$} \State \Return $(q,s)$
+    \Else \State \Return $(s,q)$
+    \EndIf
+\EndFunction
+\end{algorithmic}
+\end{algorithm}
+
+\subsection{First Pass: Pure Count}
+
+The first pass computes only the exact weight \(w_i\) of each START-event block. It performs no sampling, caching, or prefetching.
+
+\begin{algorithm}[t]
+\caption{Pass 1: Pure Count}
+\label{alg:pass1-count}
+\begin{algorithmic}[1]
+\Require sorted events $\Ecal$, number of START events $M$
+\Ensure weights $w_1,\ldots,w_M$
+\State initialize empty dynamic range trees $T_c,T_{\bar c}$
+\For{$i=1$ to $M$}
+    \State $w_i\gets 0$
+\EndFor
+\State $\textit{start\_id}\gets 0$
+\ForAll{events $ev\in\Ecal$ in order $\prec$}
+    \State $r\gets ev.\textit{box}$
+    \If{$ev.\textit{type}=\End$}
+        \State $T\gets\Call{Own-Tree}{r,T_c,T_{\bar c}}$
+        \State $\Call{Delete}{T,p(r)}$
+        \State \textbf{continue}
+    \EndIf
+    \State $\textit{start\_id}\gets\textit{start\_id}+1$; $i\gets\textit{start\_id}$; $q_i\gets r$
+    \State $\textit{Opp}\gets\Call{Opp-Tree}{q_i,T_c,T_{\bar c}}$; $\textit{Own}\gets\Call{Own-Tree}{q_i,T_c,T_{\bar c}}$
+    \State $Q\gets\Call{Make-Range}{q_i}$
+    \State $w_i\gets\Call{RT-Count}{\textit{Opp},Q}$
+    \State $\Call{Insert}{\textit{Own},p(q_i)}$
+\EndFor
+\State \Return $w$
+\end{algorithmic}
+\end{algorithm}
+
+\subsection{Output-Position Assignment}
+
+After the first pass, the algorithm assigns each output position independently to an event block based only on the weight array \(w\).
+
+\begin{algorithm}[t]
+\caption{Output-Position Assignment}
+\label{alg:assign}
+\begin{algorithmic}[1]
+\Require weights $w_1,\ldots,w_M$, sample size $t$
+\Ensure position lists $L_1,\ldots,L_M$, total weight $W$
+\State $W\gets\sum_{i=1}^{M}w_i$
+\For{$i=1$ to $M$}
+    \State $L_i\gets[\,]$
+\EndFor
+\If{$W=0$}
+    \State \Return $(L,W)$
+\EndIf
+\State build a discrete sampler over $\{1,\ldots,M\}$ with probability $\Pr[I=i]=w_i/W$
+\For{$j=1$ to $t$}
+    \State draw $I_j$ independently from $\Pr[I=i]=w_i/W$
+    \State append $j$ to $L_{I_j}$
+\EndFor
+\State \Return $(L,W)$
+\end{algorithmic}
+\end{algorithm}
+
+\subsection{Second Pass: Pure Sample}
+
+The second pass replays exactly the same event order. It does not recompute global weights and performs no prefetching. It calls \textsc{RT-Sample} only at START events for which \(L_i\) is nonempty, and writes the sampled partners into the corresponding output positions.
+
+\begin{algorithm}[t]
+\caption{Pass 2: Pure Sample}
+\label{alg:pass2-sample}
+\begin{algorithmic}[1]
+\Require sorted events $\Ecal$, position lists $L_i$, sample size $t$
+\Ensure completed output $Z[1..t]$
+\State initialize output array $Z[1..t]$
+\State re-initialize empty dynamic range trees $T_c,T_{\bar c}$
+\State $\textit{start\_id}\gets 0$
+\ForAll{events $ev\in\Ecal$ in the same order $\prec$}
+    \State $r\gets ev.\textit{box}$
+    \If{$ev.\textit{type}=\End$}
+        \State $T\gets\Call{Own-Tree}{r,T_c,T_{\bar c}}$
+        \State $\Call{Delete}{T,p(r)}$
+        \State \textbf{continue}
+    \EndIf
+    \State $\textit{start\_id}\gets\textit{start\_id}+1$; $i\gets\textit{start\_id}$; $q_i\gets r$
+    \State $\textit{Opp}\gets\Call{Opp-Tree}{q_i,T_c,T_{\bar c}}$; $\textit{Own}\gets\Call{Own-Tree}{q_i,T_c,T_{\bar c}}$
+    \If{$L_i$ is not empty}
+        \State $Q\gets\Call{Make-Range}{q_i}$
+        \State $\textit{partners}\gets\Call{RT-Sample}{\textit{Opp},Q,|L_i|}$
+        \For{$\ell=1$ to $|L_i|$}
+            \State $j\gets L_i[\ell]$
+            \State $Z[j]\gets\Call{Map-Pair}{q_i,\textit{partners}[\ell]}$
+        \EndFor
+    \EndIf
+    \State $\Call{Insert}{\textit{Own},p(q_i)}$
+\EndFor
+\State \Return $Z$
+\end{algorithmic}
+\end{algorithm}
+
+The second pass must use exactly the same event order \(\prec\) as the first pass, including the END-before-START rule and the id-based tie-breaking rule. Otherwise, the active set associated with the \(i\)-th START event may differ.
+
+\subsection{Overall Algorithm: SweepRT}
+
+\begin{algorithm}[t]
+\caption{SweepRT: Two-Pass Count/Sample}
+\label{alg:sweeprt}
+\begin{algorithmic}[1]
+\Require box sets $\Rc,\Rbar$, sample size $t$, random seed \texttt{master\_seed}
+\Ensure $Z[1..t]$, \(\iid\) uniform samples with replacement from $\J$
+\State $\Ecal\gets$ build $\Start/\End$ events from $\Rc\cup\Rbar$
+\State sort $\Ecal$ by coordinate, END-before-START, and then global id tie-break
+\State $M\gets$ number of START events in $\Ecal$
+\State $w\gets\Call{Pass1-Count}{\Ecal,M}$
+\State $(L,W)\gets\Call{Assign-Positions}{w,t}$
+\If{$W=0$}
+    \State \Return empty sequence
+\EndIf
+\State $Z\gets\Call{Pass2-Sample}{\Ecal,L,t}$
+\State \Return $Z$
+\end{algorithmic}
+\end{algorithm}
+
+\section{Correctness Proof}
+
+\begin{lemma}[Event-Block Decomposition]
+The event blocks produced by plane sweep satisfy
+\[
+ \J=\biguplus_{i=1}^{M}J_i,
+ \qquad
+ |\J|=\sum_{i=1}^{M}w_i.
+\]
+\end{lemma}
+
+\begin{proof}
+Consider an arbitrary intersecting pair \((r_c,r_{\bar c})\). Let \(\Start(q_i)\) be the later of the two START events, and let \(s\) be the other box. If the two START coordinates are equal, the later event is determined by the global id tie-break. When the earlier START event occurs, the later box has not yet entered the active set, so the pair cannot be discovered at that time. When the later START event occurs, because the two boxes intersect as half-open boxes in dimension \(1\), the earlier box has not yet ended and hence remains active in the active set of the opposite side. Moreover, the two boxes also intersect in the remaining dimensions. Therefore, \(s\in K_i\), and the pair belongs to \(J_i\). Any pair can be discovered only at the later START event, and hence the event blocks are mutually disjoint and cover all of \(\J\).
+\end{proof}
+
+\begin{lemma}[Range-Tree Query Equivalence]
+For any START event \(e_i=\Start(q_i)\) and any active box \(s\) on the opposite side,
+\[
+ s\in K_i \iff p(s)\in Q(q_i).
+\]
+\end{lemma}
+
+\begin{proof}
+Intersection in dimension \(1\) is already guaranteed by active-set membership. For any projected dimension \(j\), the half-open intersection condition is
+\[
+ L'_j(s)<R'_j(q_i)
+ \quad\text{and}\quad
+ L'_j(q_i)<R'_j(s).
+\]
+These inequalities respectively state that the first \(h\) coordinates of \(p(s)\) lie in \((-\infty,R'_j(q_i))\), and that the last \(h\) coordinates lie in \((L'_j(q_i),+\infty)\). Strict boundaries are implemented by \((x,\id)\) keys and sentinel ids, so boundary-touching cases with equal coordinates are not incorrectly included.
+\end{proof}
+
+\begin{lemma}[Correctness of the First-Pass Count]
+The weight returned by the first pass for the \(i\)-th START event satisfies
+\[
+ w_i=|J_i|=|K_i|.
+\]
+\end{lemma}
+
+\begin{proof}
+When \(e_i=\Start(q_i)\) is processed, the range tree stores exactly the point set \(P_i\) corresponding to active boxes on the opposite side. By the range-tree query equivalence, \(P_i\cap Q(q_i)\) is in one-to-one correspondence with \(K_i\). \textsc{RT-Count} returns
+\[
+ |P_i\cap Q(q_i)|=
+ \sum_{b\in\Bcal(Q(q_i))}|P(b)|.
+\]
+Therefore, its value equals \(|K_i|\). Since \(J_i=\{\Phi_i(s):s\in K_i\}\), we also have \(|J_i|=|K_i|\).
+\end{proof}
+
+\begin{lemma}[Uniform Within-Block Sampling in the Second Pass]
+When the second pass calls
+\[
+\Call{RT-Sample}{T_{\mathrm{opp}},Q(q_i),k},
+\]
+at event \(i\), the returned values are \(k\) \(\iid\), uniform partners from \(K_i\), sampled with replacement.
+\end{lemma}
+
+\begin{proof}
+The second pass uses exactly the same event order as the first pass and, at each START event, likewise queries before insertion. Hence, when the \(i\)-th START event is processed, the active point set in the opposite-side range tree is still \(P_i\), the same as in the corresponding event of the first pass. By query equivalence, \(P_i\cap Q(q_i)\) is in one-to-one correspondence with \(K_i\).
+
+The terminal-block decomposition of the range tree gives
+\[
+ P_i\cap Q(q_i)=\biguplus_{b\in\Bcal_i}P(b),
+ \qquad
+ W_i=\sum_{b\in\Bcal_i}|P(b)|=|K_i|=w_i.
+\]
+Any partner \(s\in K_i\) corresponds to a point \(p(s)\) contained in a unique terminal block \(b(s)\). \textsc{RT-Sample} first samples block \(b\) with probability \(|P(b)|/W_i\), and then samples one point uniformly within that block. Therefore,
+\[
+ \Pr[s]
+ =\frac{|P(b(s))|}{W_i}\cdot\frac1{|P(b(s))|}
+ =\frac1{W_i}
+ =\frac1{w_i}.
+\]
+Each sample position uses fresh independent randomness for both block selection and within-block point selection. Thus, the samples obtained within a single event are \(\iid\), uniform samples with replacement over \(K_i\).
+\end{proof}
+
+\begin{theorem}[Global Uniformity and Independence of SweepRT]
+If \(|\J|>0\), then the output \(Z_1,\ldots,Z_t\) of SweepRT consists of \(\iid\), uniform samples with replacement from \(\J\).
+\end{theorem}
+
+\begin{proof}
+By event-block decomposition and correctness of the first-pass count,
+\[
+ W=\sum_{i=1}^{M}w_i=|\J|.
+\]
+For any output position \(j\), the algorithm first independently samples an event index
+\[
+ \Pr[I_j=i]=\frac{w_i}{W}.
+\]
+Conditioned on \(I_j=i\), the second pass samples uniformly within event block \(J_i\) by selecting a partner and outputting \(\Phi_i(s)\in J_i\).
+
+Consider any \(P\in\J\). By the event-block decomposition, there exists a unique \(i^*\) such that \(P\in J_{i^*}\). Hence,
+\[
+ \Pr[Z_j=P]
+ =\Pr[I_j=i^*]\Pr[Z_j=P\mid I_j=i^*]
+ =\frac{w_{i^*}}{W}\cdot\frac1{w_{i^*}}
+ =\frac1W
+ =\frac1{|\J|}.
+\]
+Thus, each output position is uniformly distributed over \(\J\).
+
+Independence follows from two facts. First, the event indices \(I_j\) for distinct output positions are generated independently. Second, in the second pass, within-block partner sampling for each output position uses independent randomness and is performed with replacement. Therefore, the values written to all output positions are equivalent to independently executing the following experiment: choose an event block according to \(w_i/W\), and then choose a partner uniformly within that block.
+\end{proof}
+
+\section{Complexity}
+
+Let
+\[
+ M=n_c+n_{\bar c},
+ \qquad
+ N=\max\{n_c,n_{\bar c}\},
+ \qquad
+ D=2(d-1)=2h.
+\]
+The dimension \(d\) is typically regarded as a constant. A dynamic \(D\)-dimensional range tree has the following standard costs:
+\begin{itemize}[leftmargin=2em]
+  \item insertion or deletion of an active point: \(O(\log^D N)\);
+  \item one \textsc{RT-Count} query: \(O(\log^D N)\);
+  \item one \textsc{RT-Sample} query generating \(k\) samples: \(O(\log^D N+k\log N)\). If block selection is implemented using prefix sums and binary search, this can be written as \(O(\log^D N+k(\log N+\log\log N))\); using an alias table removes the additional logarithmic factor for block selection.
+\end{itemize}
+
+\subsection{First-Pass Count}
+
+The first pass updates the active trees for all events and performs one \textsc{RT-Count} query for each START event:
+\[
+ O(M\log^D N).
+\]
+This pass has no sampling cost and no prefetching cost.
+
+\subsection{Position Assignment}
+
+The algorithm builds a discrete sampler over event blocks and assigns event blocks to \(t\) output positions. Using an alias table, the cost is
+\[
+ O(M+t).
+\]
+Using prefix sums and binary search, the cost is
+\[
+ O(M+t\log M).
+\]
+
+\subsection{Second-Pass Sample}
+
+The second pass replays the sweep and maintains the range trees, incurring a base cost of
+\[
+ O(M\log^D N).
+\]
+Let
+\[
+ S=|\{i: |L_i|>0\}|.
+\]
+The algorithm calls \textsc{RT-Sample} only at these \(S\) events. Since
+\[
+ \sum_{i=1}^{M}|L_i|=t,
+ \qquad
+ S\le \min\{M,t\},
+\]
+the additional sampling cost in the second pass is
+\[
+ O(S\log^D N+t\log N),
+\]
+or, under a prefix-sum implementation for block sampling,
+\[
+ O(S\log^D N+t(\log N+\log\log N)).
+\]
+
+\subsection{Total Time and Space}
+
+With alias tables, the total time can be written as
+\[
+ O\bigl((M+S)\log^D N+t\log N+M+t\bigr),
+ \qquad S\le\min\{M,t\}.
+\]
+More coarsely, it can be written as
+\[
+ O\bigl((M+\min\{M,t\})\log^D N+t\log N+M+t\bigr).
+\]
+
+The structural space for the two dynamic range trees is
+\[
+ O\bigl((n_c+n_{\bar c})\log^{D-1}N\bigr).
+\]
+The additional space used by the SweepRT framework is
+\[
+ O(M+t),
+\]
+where \(O(M)\) is for the event-block weights and position-list headers, and \(O(t)\) is for the output-position lists and the output array. The algorithm has no \(O(B)\) prefetched-cache entries because there is no budget parameter \(B\).
+
+\section{Implementation Notes}
+
+\begin{enumerate}[leftmargin=2em]
+  \item \textbf{The event order must be identical in the two passes.} Coordinate sorting, the END-before-START rule, and the id tie-break within START/END events must all be preserved.
+  \item \textbf{A START event must be queried before insertion.} This ensures that an event block is assigned to the later START among the two boxes, preventing self-joins and duplicate assignments.
+  \item \textbf{Range-tree queries must use strict open boundaries.} The use of \((x,\id)\) keys and sentinel ids excludes points equal to the boundary, ensuring that boundary-touching boxes are not counted as intersecting.
+  \item \textbf{First-pass weights must be exact.} The value \(w_i\) directly determines the event-block selection probability \(w_i/\sum_j w_j\), and therefore must not be replaced by an estimate.
+  \item \textbf{The second pass performs only sampling.} The second pass does not store global weights, cache samples, or prefetch samples; it calls \textsc{RT-Sample} only at events for which \(L_i\) is nonempty.
+  \item \textbf{Random streams should be mutually independent and reproducible.} It is recommended to use
+  \[
+    \texttt{seed}=\mathrm{Hash}(\texttt{master\_seed},\texttt{phase\_id},\texttt{event\_id},\texttt{counter})
+  \]
+  to derive independent substreams for position assignment and within-block sampling in the second pass.
+  \item \textbf{The degenerate case \(d=1\).} If \(d=1\), then \(h=0\) and \(Q(q)\) is a zero-dimensional query; in this case, the START-event block is simply the entire active set on the opposite side. It can be handled separately by a one-dimensional active-set structure supporting active counts and random-rank selection. Alternatively, one may assume \(d\ge2\) before invoking the algorithm.
+\end{enumerate}
+
+\section{Concise Summary}
+
+The two-pass Count/Sample version of SweepRT can be summarized in four steps:
+\begin{enumerate}[leftmargin=2em]
+  \item use plane sweep to decompose \(\J\) into disjoint START-event blocks \(J_i\);
+  \item first pass, pure Count: use a dynamic \(2(d-1)\)-dimensional range tree to compute the exact weight \(w_i=|J_i|\) of each event block;
+  \item independently select an event block for each output position according to \(w_i/\sum_j w_j\);
+  \item second pass, pure Sample: replay the same event order, perform within-block uniform range-tree sampling only for selected event blocks, and write the sampled pairs to the output.
+\end{enumerate}
+Consequently, the final output strictly satisfies \(\iid\), uniform sampling with replacement over \(\J\). The algorithm does not require prefetching, cache budgets, residual logic, or enumeration of the complete join result.
+
+\end{document}
