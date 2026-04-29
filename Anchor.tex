@@ -1,0 +1,771 @@
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,amsthm,mathtools}
+\usepackage{booktabs,array}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\hypersetup{colorlinks=true,linkcolor=blue,citecolor=blue,urlcolor=blue}
+
+\providecommand{\ANCHOR}{\textsc{Anchor}}
+\providecommand{\Unif}{\operatorname{Unif}}
+\providecommand{\code}[1]{\texttt{#1}}
+\providecommand{\lb}{\operatorname{lb}}
+\providecommand{\ub}{\operatorname{ub}}
+\providecommand{\Mult}{\operatorname{Mult}}
+\providecommand{\Can}{\operatorname{Can}}
+\providecommand{\pos}{\operatorname{pos}}
+\providecommand{\Callback}{\ensuremath{\mathsf{Callback}}}
+\providecommand{\Active}{\ensuremath{\mathsf{Active}}}
+\providecommand{\Src}{\ensuremath{\mathsf{Src}}}
+\providecommand{\Lat}{\ensuremath{\mathsf{Lat}}}
+\providecommand{\Stop}{\ensuremath{\mathsf{Stop}}}
+\providecommand{\Left}{\ensuremath{\mathsf{Left}}}
+\providecommand{\Right}{\ensuremath{\mathsf{Right}}}
+\providecommand{\true}{\ensuremath{\mathsf{true}}}
+\providecommand{\false}{\ensuremath{\mathsf{false}}}
+\providecommand{\Real}{\mathbb{R}}
+
+\newtheorem{theorem}{Theorem}[section]
+\newtheorem{lemma}[theorem]{Lemma}
+\newtheorem{proposition}[theorem]{Proposition}
+\newtheorem{corollary}[theorem]{Corollary}
+\theoremstyle{definition}
+\newtheorem{definition}[theorem]{Definition}
+\newtheorem{remark}[theorem]{Remark}
+
+\newenvironment{algorithmbox}[1]{%
+  \par\medskip\noindent\hrule\smallskip
+  \noindent\textbf{#1}\par\smallskip
+  \begin{enumerate}[leftmargin=1.6em,itemsep=2pt,topsep=2pt]
+}{%
+  \end{enumerate}
+  \smallskip\hrule\medskip
+}
+
+\newenvironment{algorithmsteps}{%
+  \begin{enumerate}[leftmargin=1.6em,itemsep=2pt,topsep=2pt]
+}{%
+  \end{enumerate}
+}
+
+
+\begin{document}
+
+
+\section{Problem, conventions, and computation model}
+\label{sec:anchor-setup}
+
+\subsection{Input and join objective}
+
+The input consists of two color classes of $d$-dimensional axis-aligned boxes,
+\[
+  \mathcal R \quad\text{and}\quad \mathcal S,
+\]
+where $d$ is treated as a constant throughout the analysis.  A box $q$ is written as
+\[
+  q=\prod_{j=1}^d [L_j(q),U_j(q)),
+\]
+using half-open intervals.  In one dimension, the intervals $[L_j(a),U_j(a))$ and $[L_j(b),U_j(b))$ intersect if and only if
+\[
+  L_j(a)<U_j(b)
+  \quad\text{and}\quad
+  L_j(b)<U_j(a).
+\]
+Before any sorted views are constructed, every box $q$ with $L_j(q)\ge U_j(q)$ for at least one dimension $j$ is discarded.  Such a box has empty extent and cannot participate in a non-empty box intersection.  All correctness statements below are made after this deterministic pruning step.
+
+The cross-color box-intersection join is
+\[
+  J=\{(a,b)\in\mathcal R\times\mathcal S: a\sim b\},
+\]
+where $a\sim b$ means that $a$ and $b$ intersect in every dimension.  A query specifies a length $t\ge0$ and asks for an ordered sequence
+\[
+  \mathbf S=(S_1,\ldots,S_t).
+\]
+If $J\ne\emptyset$, the target distribution is
+\[
+  S_1,\ldots,S_t\overset{\mathrm{i.i.d.}}{\sim}\Unif(J),
+\]
+or, equivalently,
+\[
+  \Pr[\mathbf S=(p_1,\ldots,p_t)]=|J|^{-t}
+  \quad\text{for all }(p_1,\ldots,p_t)\in J^t.
+\]
+Sampling is with replacement.  If $t=0$, the returned sequence is empty.  If $t>0$ and $J=\emptyset$, the returned value is the distinguished symbol \code{EMPTY-INSTANCE}.
+
+\subsection{Suffix joins}
+
+\ANCHOR{} processes dimensions in the order $1,2,\ldots,d$.  For two sets of boxes $A$ and $B$, define the suffix join
+\[
+  J^{(\ell)}(A,B)=
+  \{(a,b)\in A\times B:
+    a,b\text{ intersect in every dimension }\ell,\ell+1,\ldots,d\}.
+\]
+The top-level join is $J^{(1)}(\mathcal R,\mathcal S)$.  A recursive call at level $\ell$ enforces dimension $\ell$ by a disjoint ownership decomposition, then passes the remaining dimensions $\ell+1,\ldots,d$ to recursive calls.  The base level $\ell=d$ is handled directly by one-dimensional atoms.
+
+\subsection{Sorted views and ranks}
+
+A recursive call at level $\ell$ receives a sorted-view object
+\[
+  \mathfrak V_\ell(A,B)=
+  (A^{L_\ell},A^{L_{\ell+1}},\ldots,A^{L_d},A^{U_d};
+   B^{L_\ell},B^{L_{\ell+1}},\ldots,B^{L_d},B^{U_d}).
+\]
+Here $A^{L_j}$ is the list of objects in $A$ sorted by $L_j$, and $A^{U_d}$ is the list of objects in $A$ sorted by $U_d$; the $B$-side views are defined analogously.  Ties inside a sorted view are resolved by any fixed stable deterministic order.  The stable order among objects with equal left endpoint does not affect the mathematical set represented by any rank interval, because all interval boundaries are defined by strict or non-strict endpoint inequalities.
+
+Only the last-dimensional upper-endpoint views $A^{U_d}$ and $B^{U_d}$ are stored in every recursive view.  For dimensions $\ell<d$, ownership and canonical routing use only left-endpoint ranks in the current dimension.  The upper endpoint $U_\ell(q)$ of an object $q$ is stored in the object record and is used as a threshold for binary search in the opposite left-sorted view; no sorted $U_\ell$ view is required for $\ell<d$.  The $U_d$-sorted views are carried because the one-dimensional base case computes all terminal ranks by monotone scans.
+
+For a side $Y$, a dimension $\ell$, and an object $y\in Y$, let
+\[
+  \pos_Y^{(\ell)}(y)
+\]
+be the zero-based position of $y$ in the list $Y^{L_\ell}$.  For a threshold $\alpha$, define
+\[
+  \lb_Y^{(\ell)}(\alpha)=|\{y\in Y:L_\ell(y)<\alpha\}|,
+  \qquad
+  \ub_Y^{(\ell)}(\alpha)=|\{y\in Y:L_\ell(y)\le\alpha\}|.
+\]
+Thus $\lb$ is the first position whose left endpoint is at least $\alpha$, and $\ub$ is the first position whose left endpoint is strictly larger than $\alpha$.  When the dimension is clear, the superscript $(\ell)$ is omitted.
+
+If the sorted views are not supplied, the top-level views can be built in
+\[
+  O(dN\log N)=O(N\log N)
+\]
+time for fixed $d$, where $N=|\mathcal R|+|\mathcal S|$.  All main bounds are stated after the top-level views have been constructed.  For raw unsorted input, the initial sorting cost is added separately.
+
+\subsection{Exact discrete-random model}
+\label{subsec:exact-model}
+
+All guarantees are stated in an exact-RAM model.  Endpoint comparisons are exact, cardinalities and weights are exact nonnegative integers, and the following discrete random primitives are exact.
+\begin{description}[leftmargin=1.8em,itemsep=2pt,topsep=2pt]
+\item[Uniform integer.] Given integers $p<q$, draw uniformly from $\{p,p+1,\ldots,q-1\}$ in $O(1)$ time.
+\item[Weighted index.] Given $k$ nonnegative integer weights $w_1,\ldots,w_k$ with $W=\sum_iw_i>0$, \code{BuildIndex} constructs, in $O(k)$ time and $O(k)$ words, a sampler returning label $i$ with probability $w_i/W$ in $O(1)$ time.  Zero-weight labels are never returned.
+\item[Multinomial quotas.] Given $h\ge0$ and weights $w_1,\ldots,w_k$ with total $W>0$, \code{DrawQuotas} returns
+\[
+  (H_1,\ldots,H_k)\sim
+  \Mult\left(h;\frac{w_1}{W},\ldots,\frac{w_k}{W}\right)
+\]
+exactly.  It is implemented by one exact weighted-index construction, $h$ exact weighted draws, and an exact count of the returned labels.  The cost is $O(k+h)$ time and $O(k)$ space.
+\item[Shuffle.] Fisher--Yates shuffling produces a uniformly random permutation of a finite sequence in linear time.
+\end{description}
+No floating-point probabilities are used.  The displayed $O(t)$ query bounds for the compiled weighted choices use the exact weighted-index primitive above.  An exact implementation based on prefix sums and binary search remains correct, with the corresponding logarithmic factor per weighted draw.
+
+\section{Anchored canonical decomposition}
+\label{sec:anchor-decomposition}
+
+Fix a suffix instance $J^{(\ell)}(A,B)$ with $\ell<d$.  Dimension $\ell$ is the current ownership dimension.  The side $A$ owns equal-left-endpoint ties: if $L_\ell(a)=L_\ell(b)$, then the pair is assigned to the $A$-anchored case.
+
+\subsection{Anchor later-blocks}
+
+For $a\in A$, define the $B$-side later-block
+\[
+  X_B^{(\ell)}(a)=
+  \left[\lb_B^{(\ell)}(L_\ell(a)),\lb_B^{(\ell)}(U_\ell(a))\right).
+\]
+This is precisely the contiguous rank interval of all objects $b\in B$ satisfying
+\[
+  L_\ell(a)\le L_\ell(b)<U_\ell(a).
+\]
+For $b\in B$, define the $A$-side later-block
+\[
+  X_A^{(\ell)}(b)=
+  \left[\ub_A^{(\ell)}(L_\ell(b)),\lb_A^{(\ell)}(U_\ell(b))\right).
+\]
+This is precisely the contiguous rank interval of all objects $a\in A$ satisfying
+\[
+  L_\ell(b)<L_\ell(a)<U_\ell(b).
+\]
+The use of $\lb$ in the first lower boundary and $\ub$ in the second lower boundary is the tie rule.  Pairs with equal left endpoints are included in the $A$-anchored interval $X_B^{(\ell)}(a)$ and excluded from the $B$-anchored interval $X_A^{(\ell)}(b)$.
+
+\subsection{Canonical dyadic trees}
+
+For each side $Y\in\{A,B\}$, build a padded full binary segment tree $T_Y^{(\ell)}$ over the positions of $Y^{L_\ell}$.  If $|Y|$ is not a power of two, dummy leaves are appended up to the next power of two.  Dummy leaves never represent objects.  A tree node $z$ represents the real dyadic interval
+\[
+  I_Y(z)=[\lambda(z),\rho(z))\cap[0,|Y|).
+\]
+Nodes with $I_Y(z)=\emptyset$ are ignored.  For an interval $X=[p,q)\subseteq[0,|Y|)$, define $\Can_Y(X)$ to be the set of nodes $z$ satisfying the following three conditions:
+\begin{enumerate}[leftmargin=1.6em,itemsep=2pt,topsep=2pt]
+\item $I_Y(z)\ne\emptyset$;
+\item $I_Y(z)\subseteq X$;
+\item no ancestor $z'$ of $z$ with $I_Y(z')\ne\emptyset$ satisfies $I_Y(z')\subseteq X$.
+\end{enumerate}
+Maximality is by tree ancestry.  This convention removes any ambiguity caused by padding: even if two padded nodes have the same truncated real interval, only the highest node whose real interval is contained in $X$ is selected.
+
+\begin{lemma}[Canonical cover properties]
+\label{lem:anchor-canonical-cover}
+For every rank interval $X=[p,q)\subseteq[0,|Y|)$, the intervals $\{I_Y(z):z\in\Can_Y(X)\}$ are pairwise disjoint and their union is $X$.  Moreover,
+\[
+  |\Can_Y(X)|=O(\log(|Y|+1)),
+\]
+and at any fixed tree depth, the interval $X$ contributes $O(1)$ selected canonical nodes and $O(1)$ unresolved boundary fragments.
+\end{lemma}
+
+\begin{proof}
+Every position $r\in X$ lies on a unique root-to-leaf path.  The leaf containing $r$ has nonempty real interval contained in $X$, so along that path there is a highest node whose nonempty real interval is contained in $X$.  That node belongs to $\Can_Y(X)$ and covers $r$.  Thus the canonical intervals cover $X$.  Two selected nodes cannot be in an ancestor-descendant relation by maximality, and incomparable tree nodes have disjoint padded intervals.  Therefore the selected real intervals are pairwise disjoint.
+
+At a fixed depth, dyadic intervals intersecting $X$ form a contiguous run.  All intervals strictly inside this run are either selected at that depth or are descendants of a selected ancestor; the only intervals that can remain unresolved are the intervals touching the left and right boundaries of $X$.  Hence there are $O(1)$ selected canonical nodes and $O(1)$ unresolved boundary fragments per depth.  Since the padded tree height is $O(\log(|Y|+1))$, the total canonical cover size is $O(\log(|Y|+1))$.
+\end{proof}
+
+\subsection{Local suffix instances}
+
+For a node $v$ in the $B$-tree, define
+\[
+  A_v^{(\ell)}=
+  \{a\in A:v\in\Can_B(X_B^{(\ell)}(a))\},
+  \qquad
+  B_v^{(\ell)}=
+  \{b\in B:\pos_B^{(\ell)}(b)\in I_B(v)\}.
+\]
+For a node $u$ in the $A$-tree, define
+\[
+  A_u^{(\ell)}=
+  \{a\in A:\pos_A^{(\ell)}(a)\in I_A(u)\},
+  \qquad
+  B_u^{(\ell)}=
+  \{b\in B:u\in\Can_A(X_A^{(\ell)}(b))\}.
+\]
+When the tree side is not important, write $A_z^{(\ell)}$ and $B_z^{(\ell)}$ for the two local sides induced by node $z$.  The same object may appear in several local nodes, but a join pair appears in exactly one local suffix instance.  The decomposition is pair-disjoint, not object-disjoint.
+
+\begin{theorem}[Anchored canonical decomposition]
+\label{thm:anchor-decomposition}
+For every suffix instance $(A,B)$ and every $\ell<d$,
+\[
+  J^{(\ell)}(A,B)=
+  \biguplus_{z\in T_A^{(\ell)}\cup T_B^{(\ell)}}
+  J^{(\ell+1)}\bigl(A_z^{(\ell)},B_z^{(\ell)}\bigr),
+\]
+where empty local instances may be omitted.
+\end{theorem}
+
+\begin{proof}
+Let $(a,b)\in J^{(\ell)}(A,B)$.  Since the pair intersects in dimension $\ell$,
+\[
+  L_\ell(a)<U_\ell(b),
+  \qquad
+  L_\ell(b)<U_\ell(a).
+\]
+If $L_\ell(a)\le L_\ell(b)$, then
+\[
+  \pos_B^{(\ell)}(b)\in X_B^{(\ell)}(a).
+\]
+The canonical cover $\Can_B(X_B^{(\ell)}(a))$ partitions $X_B^{(\ell)}(a)$ into disjoint node intervals.  Hence there is a unique node $v\in\Can_B(X_B^{(\ell)}(a))$ whose interval contains $\pos_B^{(\ell)}(b)$.  Thus $a\in A_v^{(\ell)}$ and $b\in B_v^{(\ell)}$, so the pair appears in the $v$-term.  It appears in no other $B$-tree term because the canonical intervals for the fixed anchor $a$ are disjoint.  It appears in no $A$-tree term because $X_A^{(\ell)}(b)$ contains only $A$-objects with left endpoint strictly larger than $L_\ell(b)$.
+
+If $L_\ell(b)<L_\ell(a)$, the same argument assigns the pair to the unique node $u\in\Can_A(X_A^{(\ell)}(b))$ whose interval contains $\pos_A^{(\ell)}(a)$.  It cannot appear in a $B$-tree term because $X_B^{(\ell)}(a)$ contains only $B$-objects with left endpoint at least $L_\ell(a)$.
+
+Thus every suffix-join pair is assigned exactly once.  Conversely, consider a pair represented by a $B$-tree node $v$: $a\in A_v^{(\ell)}$ and $b\in B_v^{(\ell)}$.  Since $I_B(v)\subseteq X_B^{(\ell)}(a)$ and $\pos_B^{(\ell)}(b)\in I_B(v)$,
+\[
+  L_\ell(a)\le L_\ell(b)<U_\ell(a).
+\]
+The box $b$ is nondegenerate in dimension $\ell$, so $L_\ell(b)<U_\ell(b)$, which implies $L_\ell(a)<U_\ell(b)$.  Hence $a$ and $b$ intersect in the current dimension.  The $A$-tree case gives $L_\ell(b)<L_\ell(a)<U_\ell(b)$ and uses nondegeneracy of $a$ to obtain $L_\ell(b)<U_\ell(a)$.  Therefore each local node only needs to test dimensions $\ell+1,\ldots,d$, which is exactly the suffix join on the right-hand side.
+\end{proof}
+
+\section{One-dimensional terminal atoms}
+\label{sec:anchor-base}
+
+At level $\ell=d$, the suffix join is one-dimensional and can be sampled directly.  The same tie rule is used: the $A$ side owns equal-left-endpoint pairs.
+
+\subsection{Atom family}
+
+For each $a\in A$, define the $A$-anchored atom
+\[
+  \mathcal A_d(a)=
+  \{(a,b):b\in B,\ L_d(a)\le L_d(b)<U_d(a)\}.
+\]
+Its cardinality is
+\[
+  \alpha(a)=
+  \lb_B^{(d)}(U_d(a))-\lb_B^{(d)}(L_d(a)).
+\]
+For each $b\in B$, define the $B$-anchored atom
+\[
+  \mathcal B_d(b)=
+  \{(a,b):a\in A,\ L_d(b)<L_d(a)<U_d(b)\}.
+\]
+Its cardinality is
+\[
+  \beta(b)=
+  \lb_A^{(d)}(U_d(b))-\ub_A^{(d)}(L_d(b)).
+\]
+Every one-dimensional intersecting pair either satisfies $L_d(a)\le L_d(b)<U_d(a)$ or satisfies $L_d(b)<L_d(a)<U_d(b)$, and the two cases are disjoint.  Therefore
+\[
+  J^{(d)}(A,B)=
+  \left(\biguplus_{a\in A}\mathcal A_d(a)\right)
+  \uplus
+  \left(\biguplus_{b\in B}\mathcal B_d(b)\right).
+\]
+Let
+\[
+  W_d=\sum_{a\in A}\alpha(a)+\sum_{b\in B}\beta(b).
+\]
+Then $W_d=|J^{(d)}(A,B)|$.
+
+A positive atom is represented by a record
+\[
+  \tau=(\mathrm{side},\mathrm{anchor},\mathrm{opp},lo,hi,\omega),
+\]
+where $\mathrm{side}\in\{A,B\}$ indicates the anchor side, $\mathrm{anchor}$ is the anchor object, $\mathrm{opp}$ is a pointer to the terminal-local opposite array sorted by $L_d$, $[lo,hi)$ is the opposite-side rank interval inside that terminal-local array, and $\omega=hi-lo$ is the atom weight.  Write $\Omega_\tau$ for the set of pairs represented by $\tau$.  If $\mathrm{side}=A$, then $\mathrm{opp}=B^{L_d}$ and
+\[
+  [lo,hi)=[\lb_B(L_d(a)),\lb_B(U_d(a))).
+\]
+If $\mathrm{side}=B$, then $\mathrm{opp}=A^{L_d}$ and
+\[
+  [lo,hi)=[\ub_A(L_d(b)),\lb_A(U_d(b))).
+\]
+The pointer is always to the terminal-local array of the current suffix instance, not to a global $L_d$ view.
+
+\subsection{Computing terminal atoms}
+
+\begin{algorithmbox}{ComputeBaseAtoms$_d(\mathfrak V_d(A,B))$}
+\item Initialize temporary arrays $lo_B[a]$, $hi_B[a]$ for $a\in A$ and $lo_A[b]$, $hi_A[b]$ for $b\in B$.
+\item Sweep $A^{L_d}$ in increasing $L_d(a)$ while advancing a pointer in $B^{L_d}$ past all objects with $L_d(b)<L_d(a)$; set
+\[
+  lo_B[a]=\lb_B^{(d)}(L_d(a)).
+\]
+\item Sweep $A^{U_d}$ in increasing $U_d(a)$ while advancing a pointer in $B^{L_d}$ past all objects with $L_d(b)<U_d(a)$; set
+\[
+  hi_B[a]=\lb_B^{(d)}(U_d(a)).
+\]
+\item Sweep $B^{L_d}$ in increasing $L_d(b)$ while advancing a pointer in $A^{L_d}$ past all objects with $L_d(a)\le L_d(b)$; set
+\[
+  lo_A[b]=\ub_A^{(d)}(L_d(b)).
+\]
+\item Sweep $B^{U_d}$ in increasing $U_d(b)$ while advancing a pointer in $A^{L_d}$ past all objects with $L_d(a)<U_d(b)$; set
+\[
+  hi_A[b]=\lb_A^{(d)}(U_d(b)).
+\]
+\item For every $a\in A$ with $hi_B[a]>lo_B[a]$, emit
+\[
+  (A,a,B^{L_d},lo_B[a],hi_B[a],hi_B[a]-lo_B[a]).
+\]
+\item For every $b\in B$ with $hi_A[b]>lo_A[b]$, emit
+\[
+  (B,b,A^{L_d},lo_A[b],hi_A[b],hi_A[b]-lo_A[b]).
+\]
+\item Return the atom list $\mathcal T_d$ and its total weight $W_d=\sum_{\tau\in\mathcal T_d}\omega_\tau$.
+\end{algorithmbox}
+
+All four rank computations are monotone scans.  ComputeBaseAtoms$_d$ takes $O(|A|+|B|)$ time and $O(|A|+|B|)$ temporary space.  The atom list contains at most $|A|+|B|$ records.
+
+\begin{algorithmbox}{BaseCount$_d(\mathfrak V_d(A,B))$}
+\item Run ComputeBaseAtoms$_d(\mathfrak V_d(A,B))$.
+\item Return the total atom weight $W_d$.
+\end{algorithmbox}
+
+\begin{algorithmbox}{BaseSample$_d(\mathfrak V_d(A,B),h)$}
+\item If $h=0$, return the empty sequence.
+\item Run ComputeBaseAtoms$_d(\mathfrak V_d(A,B))$ and obtain atoms $\mathcal T_d$ and total weight $W_d$.
+\item If $W_d=0$, return \code{EMPTY-INSTANCE}.
+\item Build an exact weighted index on the atom weights $(\omega_\tau)_{\tau\in\mathcal T_d}$.
+\item For $r=1,\ldots,h$:
+  \begin{enumerate}[leftmargin=1.5em,itemsep=1pt,topsep=1pt]
+  \item draw an atom $\tau=(\mathrm{side},\mathrm{anchor},\mathrm{opp},lo,hi,\omega)$ with probability $\omega/W_d$;
+  \item draw $j$ uniformly from $\{lo,lo+1,\ldots,hi-1\}$;
+  \item if $\mathrm{side}=A$, output $(\mathrm{anchor},\mathrm{opp}[j])$; if $\mathrm{side}=B$, output $(\mathrm{opp}[j],\mathrm{anchor})$.
+  \end{enumerate}
+\item Return the ordered sequence of $h$ pairs.
+\end{algorithmbox}
+
+\begin{lemma}[Terminal sampler]
+\label{lem:anchor-base}
+BaseCount$_d$ returns $|J^{(d)}(A,B)|$.  If $h>0$ and $J^{(d)}(A,B)\ne\emptyset$, BaseSample$_d$ returns $h$ independent uniform samples from $J^{(d)}(A,B)$.  If $h>0$ and $J^{(d)}(A,B)=\emptyset$, it returns \code{EMPTY-INSTANCE}.  If $h=0$, it returns the empty sequence.
+\end{lemma}
+
+\begin{proof}
+The atom families form a disjoint cover of $J^{(d)}(A,B)$, and the weight of each atom is exactly its cardinality.  Therefore BaseCount$_d$ returns the join cardinality.  For a pair $p\in\Omega_\tau$ inside atom $\tau$,
+\[
+  \Pr[p]=\frac{\omega_\tau}{W_d}\cdot\frac{1}{\omega_\tau}=\frac{1}{W_d}.
+\]
+The weighted-index draws and the within-atom offset draws are independent across output positions, so the returned sequence is i.i.d. uniform over the one-dimensional join.
+\end{proof}
+
+\section{Streaming realization}
+\label{sec:anchor-streaming}
+
+\ANCHOR-Streaming realizes Theorem~\ref{thm:anchor-decomposition} without storing all recursive nodes simultaneously.  At a current level $\ell<d$, the algorithm processes the $B$-tree and the $A$-tree separately.  The two sweeps share the same routing primitive after choosing a source side, a later side, and an orientation map.
+
+\subsection{Orientations and deeper keys}
+
+The $B$-tree orientation has source side $A$ and later side $B$.  A source object $a\in A$ carries the interval $X_B^{(\ell)}(a)$ in the position space of $B^{L_\ell}$, and a node-local callback receives the view $\mathfrak V_{\ell+1}(A_z^{(\ell)},B_z^{(\ell)})$.
+
+The $A$-tree orientation has source side $B$ and later side $A$.  A source object $b\in B$ carries the interval $X_A^{(\ell)}(b)$ in the position space of $A^{L_\ell}$.  The orientation map swaps the sides before invoking a recursive callback, so every callback still receives a view ordered as $\mathfrak V_{\ell+1}(A_z^{(\ell)},B_z^{(\ell)})$.
+
+Let
+\[
+  \mathcal K_{\ell+1}=\{L_{\ell+1},L_{\ell+2},\ldots,L_d,U_d\}
+\]
+be the set of sorted keys required by the next recursion level.  For every key $K\in\mathcal K_{\ell+1}$, routing maintains source lists and later lists sorted by $K$.
+
+\subsection{Stable routing records}
+
+For one oriented tree, write $S$ for the source side and $Y$ for the later side.  Each later record stores an object $y\in Y$ and its current-position value $\pos_Y^{(\ell)}(y)$.  Each source record stores an object $s\in S$ and its interval $X(s)=[lo(s),hi(s))$ in the position space of $Y^{L_\ell}$.  Empty source intervals are ignored.
+
+For a node $z$, the list $\Lat_K(z)$ contains the later records in $I_Y(z)$, sorted by key $K$.  The list $\Src_K(z)$ contains unresolved source records whose intervals intersect $I_Y(z)$ and have not stopped at an ancestor.  A source record in $\Src_K(z)$ stops at $z$ exactly when
+\[
+  I_Y(z)\subseteq X(s).
+\]
+Otherwise it remains unresolved and is sent to every child $c$ with
+\[
+  I_Y(c)\cap X(s)\ne\emptyset.
+\]
+A single unresolved source may therefore be copied to both children.  Later records are never copied: each later object belongs to exactly one child interval.  All distributions are stable, meaning that the relative order inherited from a parent $K$-sorted list is preserved inside every produced $K$-sorted list.
+
+This routing rule has a direct canonical interpretation.  For a fixed source object $s$, the nodes where it stops are exactly $\Can_Y(X(s))$; copies that move downward are only the unresolved boundary fragments of $X(s)$.
+
+\subsection{RouteTree primitive}
+
+The following primitive is used by counting, weight computation, and active sampling.  The callback receives a complete local suffix view.  The activity predicate determines whether a subtree is traversed.
+
+\begin{algorithmbox}{RouteTree$_\ell(S,Y,X,\mathrm{orient},\Callback,\Active)$}
+\item Build the padded segment tree over the positions of $Y^{L_\ell}$; ignore dummy-only nodes.
+\item For every key $K\in\mathcal K_{\ell+1}$, initialize the root later list as $Y^K$ and the root source list as the stable restriction of $S^K$ to sources with $X(s)\ne\emptyset$.
+\item Process the tree level by level.  A node is present if at least one of its source or later lists is nonempty.  A present node $z$ is processed only if $\Active(z)=\true$.
+\item For each processed node $z$:
+  \begin{enumerate}[leftmargin=1.5em,itemsep=1pt,topsep=1pt]
+  \item For every key $K$, scan $\Src_K(z)$ and form three stable output lists:
+  \[
+    \Stop_K(z),\qquad \Src_K(\mathrm{left}(z)),\qquad \Src_K(\mathrm{right}(z)).
+  \]
+  A source is appended to $\Stop_K(z)$ if $I_Y(z)\subseteq X(s)$.  Otherwise it is appended to the left-child list if $I_Y(\mathrm{left}(z))\cap X(s)\ne\emptyset$, and appended to the right-child list if $I_Y(\mathrm{right}(z))\cap X(s)\ne\emptyset$.  Both appends may occur.
+  \item For every key $K$, scan $\Lat_K(z)$ and form the stable child lists $\Lat_K(\mathrm{left}(z))$ and $\Lat_K(\mathrm{right}(z))$ by the current-position value.  A later record is appended to exactly one nonempty child interval.
+  \item If $\Callback$ requests node $z$, build the local view from the stopped source lists and the current later lists:
+    \begin{itemize}[leftmargin=1.5em,itemsep=1pt,topsep=1pt]
+    \item in the $B$-tree orientation, $\Stop_K(z)$ is the $A_z^K$ list and $\Lat_K(z)$ is the $B_z^K$ list;
+    \item in the $A$-tree orientation, $\Lat_K(z)$ is the $A_z^K$ list and $\Stop_K(z)$ is the $B_z^K$ list.
+    \end{itemize}
+    Pass the resulting $\mathfrak V_{\ell+1}(A_z,B_z)$ to $\Callback$.
+  \item Retain a child list only if the child has nonempty real interval and $\Active(\mathrm{child})=\true$.
+  \end{enumerate}
+\item After a level is processed, discard that level's lists and continue with the next level's retained lists.
+\end{algorithmbox}
+
+In a counting or node-weight pass, every subtree is active and the callback requests every node whose stopped source side and later side are both nonempty.  In an active sampling pass, a subtree is active exactly when some selected output lies in that subtree.  If no output is selected from one of the two current ownership trees, the root of that tree is inactive and the tree is not routed.
+
+\begin{lemma}[Local-view invariant]
+\label{lem:anchor-local-view}
+Whenever RouteTree$_\ell$ invokes the callback at a node $z$, the view passed to the callback is exactly
+\[
+  \mathfrak V_{\ell+1}(A_z^{(\ell)},B_z^{(\ell)}).
+\]
+For every key $K\in\mathcal K_{\ell+1}$, each local list is sorted by $K$ in the same stable order as the corresponding restricted sorted view.
+\end{lemma}
+
+\begin{proof}
+The proof is by induction on the depth of $z$.  At the root, the later list for key $K$ is $Y^K$, and the source list is the stable restriction of $S^K$ to sources with nonempty interval.  Both lists are sorted by $K$.
+
+Assume the invariant holds for a node $z$.  The later records in $\Lat_K(z)$ are exactly the objects whose current positions lie in $I_Y(z)$.  Stable distribution by child interval sends each later record to the unique child interval containing its current position.  Thus the child later lists are exactly the restricted later views and remain sorted by $K$.
+
+For a source record $s\in\Src_K(z)$, if $I_Y(z)\subseteq X(s)$, then $s$ has not stopped at an ancestor and $z$ is the highest remaining node on this routed path whose real interval is contained in $X(s)$.  Hence $z\in\Can_Y(X(s))$, and $s$ belongs to $\Stop_K(z)$.  If $I_Y(z)\nsubseteq X(s)$, then $s$ cannot stop at $z$; the unresolved portion of $X(s)$ inside $I_Y(z)$ is exactly represented by the children whose intervals intersect $X(s)$.  Copying $s$ to all such children preserves every boundary fragment.  Since all appends are stable, each stopped or child source list remains sorted by $K$.
+
+Consequently, the stopped source lists at $z$ are precisely the source objects whose canonical decomposition contains $z$, and the current later lists at $z$ are precisely the later objects in $I_Y(z)$.  Applying the orientation map yields the local sides $(A_z^{(\ell)},B_z^{(\ell)})$ with all required deeper sorted views.
+\end{proof}
+
+\begin{lemma}[Per-depth volume]
+\label{lem:anchor-per-depth}
+For a current suffix instance of size $m=|A|+|B|$, at any fixed depth of either current canonical tree, the total number of routed source records, stopped source records, later records, and node-local records over all nodes at that depth is $O(m)$.  The constant depends only on the fixed dimension $d$.
+\end{lemma}
+
+\begin{proof}
+Fix one key $K$.  Each later object follows exactly one root-to-leaf path and appears in one later list at the fixed depth.  For a source interval $X=[p,q)$, the routing rule stops a source as soon as a routed node interval is fully contained in $X$.  Hence the only unresolved routed copies that can survive to any fixed depth are the boundary copies whose node intervals intersect the left or right boundary of $X$; there are at most two such copies.  The stopped copies at that same depth are canonical-cover nodes, and a dyadic canonical cover of one interval contains at most two nodes at any fixed depth.  Thus each source object contributes $O(1)$ routed or stopped source records per depth for key $K$.  There are $O(d)$ keys in $\mathcal K_{\ell+1}$, so the total record volume at the depth is $O(m)$.  Node-local records are the stopped source records together with the later records of the same nodes, and therefore satisfy the same bound.
+\end{proof}
+
+\subsection{Current-level rank intervals}
+
+Before sweeping the current ownership trees, the algorithm computes every source interval.  For $a\in A$,
+\[
+  X_B^{(\ell)}(a)=
+  [\lb_B^{(\ell)}(L_\ell(a)),\lb_B^{(\ell)}(U_\ell(a))).
+\]
+For $b\in B$,
+\[
+  X_A^{(\ell)}(b)=
+  [\ub_A^{(\ell)}(L_\ell(b)),\lb_A^{(\ell)}(U_\ell(b))).
+\]
+The rank values are obtained by binary search in the current opposite left-sorted view.  The cost is $O(m\log(m+1))$ for $m=|A|+|B|$.  When additional upper-endpoint sorted views are maintained, the same ranks can be computed by linear multi-scans, but the binary-search version is sufficient for the stated bounds.
+
+\subsection{Recursive counting}
+
+\begin{algorithmbox}{Count$_\ell(\mathfrak V_\ell(A,B))$}
+\item If $A=\emptyset$ or $B=\emptyset$, return $0$.
+\item If $\ell=d$, return BaseCount$_d(\mathfrak V_d(A,B))$.
+\item Compute all intervals $X_B^{(\ell)}(a)$ for $a\in A$ and $X_A^{(\ell)}(b)$ for $b\in B$.
+\item Set $W\leftarrow0$.
+\item Run RouteTree$_\ell(A,B,X_B,\mathrm{Btree},\Callback,\Active)$ with every subtree active.  For a requested node $z$, the callback computes
+\[
+  w_z=\mathrm{Count}_{\ell+1}(\mathfrak V_{\ell+1}(A_z,B_z))
+\]
+and adds $w_z$ to $W$.
+\item Run RouteTree$_\ell(B,A,X_A,\mathrm{Atree},\Callback,\Active)$ analogously and add every recursive weight to $W$.
+\item Return $W$.
+\end{algorithmbox}
+
+\begin{lemma}[Counting correctness]
+\label{lem:anchor-counting}
+For every suffix instance, Count$_\ell(\mathfrak V_\ell(A,B))$ returns $|J^{(\ell)}(A,B)|$.
+\end{lemma}
+
+\begin{proof}
+The proof is by induction on the number of remaining dimensions.  The base case is Lemma~\ref{lem:anchor-base}.  For $\ell<d$, Lemma~\ref{lem:anchor-local-view} supplies every node-local view exactly.  By the induction hypothesis, the recursive call at node $z$ returns
+\[
+  |J^{(\ell+1)}(A_z^{(\ell)},B_z^{(\ell)})|.
+\]
+Theorem~\ref{thm:anchor-decomposition} expresses $J^{(\ell)}(A,B)$ as the disjoint union of these node-local suffix joins.  Summing the recursive weights gives the exact suffix-join cardinality.
+\end{proof}
+
+\section{Exact recursive sampling}
+\label{sec:anchor-sampling}
+
+Sampling uses the same geometric decomposition as counting.  At a non-terminal level, the sampler first computes the exact size of every current node-local suffix join.  It then allocates a multinomial quota over these disjoint pieces, recursively samples only pieces with positive quota, and shuffles the concatenated output.
+
+\subsection{Node weights}
+
+\begin{algorithmbox}{NodeWeights$_\ell(\mathfrak V_\ell(A,B))$}
+\item Compute all intervals $X_B^{(\ell)}(a)$ and $X_A^{(\ell)}(b)$.
+\item Initialize node-weight arrays $w_z\leftarrow0$ for all nodes in the current $B$-tree and $A$-tree.
+\item Run RouteTree$_\ell$ on the $B$-tree with every subtree active.  For every requested node $z$, set
+\[
+  w_z\leftarrow \mathrm{Count}_{\ell+1}(\mathfrak V_{\ell+1}(A_z,B_z)).
+\]
+\item Run RouteTree$_\ell$ on the $A$-tree analogously.
+\item Return the interval arrays, node-weight arrays, and $W=\sum_z w_z$.
+\end{algorithmbox}
+
+Since each current tree has $O(m)$ nodes, the two node-weight arrays use $O(m)$ words.  By Lemma~\ref{lem:anchor-counting} and Theorem~\ref{thm:anchor-decomposition}, $W=|J^{(\ell)}(A,B)|$.
+
+Given a query quota $h$ and node weights $(w_z)$ with total $W>0$, the sampler draws
+\[
+  (H_z)_z\sim
+  \Mult\left(h;\left(\frac{w_z}{W}\right)_z\right).
+\]
+For every tree node $z$, define the selected subtree quota
+\[
+  Q_z=H_z+\sum_{c\text{ child of }z}Q_c,
+\]
+computed bottom-up.  A node with $H_z=0$ but $Q_z>0$ must still be routed, because selected descendants need their local views.  A node with $Q_z=0$ can be skipped together with its entire subtree.
+
+\subsection{Weighted composition lemma}
+
+\begin{lemma}[Weighted quota composition]
+\label{lem:anchor-quota}
+Let $\Omega=\biguplus_{i=1}^k\Omega_i$, let $w_i=|\Omega_i|$, and let $W=\sum_iw_i>0$.  Draw
+\[
+  (H_1,\ldots,H_k)\sim
+  \Mult\left(h;\frac{w_1}{W},\ldots,\frac{w_k}{W}\right).
+\]
+For each $i$ with $H_i>0$, draw $H_i$ independent uniform samples from $\Omega_i$.  Concatenate all generated samples in any deterministic block order and then apply a uniformly random permutation.  The final ordered sequence consists of $h$ independent uniform samples from $\Omega$.
+\end{lemma}
+
+\begin{proof}
+Consider the coordinate-wise experiment that, independently for every output position, first chooses a label $i$ with probability $w_i/W$ and then draws uniformly from $\Omega_i$.  For any $x\in\Omega_i$, one coordinate equals $x$ with probability
+\[
+  \frac{w_i}{W}\cdot\frac{1}{w_i}=\frac{1}{W}.
+\]
+Thus every coordinate is uniform over $\Omega$, and the coordinates are independent.  The vector of label counts in this experiment has the stated multinomial distribution.  Conditioning on those counts gives independent within-block samples.  Concatenating by label forgets the coordinate order; a uniform shuffle restores the exchangeable ordered distribution of the coordinate-wise experiment.
+\end{proof}
+
+\subsection{Recursive sampler}
+
+\begin{algorithmbox}{Sample$_\ell(\mathfrak V_\ell(A,B),h)$}
+\item If $h=0$, return the empty sequence.
+\item If $A=\emptyset$ or $B=\emptyset$, return \code{EMPTY-INSTANCE}.
+\item If $\ell=d$, return BaseSample$_d(\mathfrak V_d(A,B),h)$.
+\item Run NodeWeights$_\ell(\mathfrak V_\ell(A,B))$ and obtain intervals, node weights $(w_z)_z$, and total weight $W$.
+\item If $W=0$, return \code{EMPTY-INSTANCE}.
+\item Draw multinomial node quotas $(H_z)_z$ from the exact weights $(w_z)_z$.
+\item For both current trees, compute selected subtree quotas $Q_z$ bottom-up.
+\item Initialize an empty output buffer $\mathcal O$.
+\item Run a sample pass over the $B$-tree using RouteTree$_\ell(A,B,X_B,\mathrm{Btree},\Callback,\Active)$, where $\Active(z)$ is the predicate $Q_z>0$.  The callback requests node $z$ if and only if $H_z>0$; on such a node it appends
+\[
+  \mathrm{Sample}_{\ell+1}(\mathfrak V_{\ell+1}(A_z,B_z),H_z)
+\]
+to $\mathcal O$.
+\item Run the analogous sample pass over the $A$-tree.
+\item Apply Fisher--Yates shuffle to $\mathcal O$ and return it.
+\end{algorithmbox}
+
+If $H_z>0$, then the exact multinomial draw implies $w_z>0$, so the recursive call is made only on a non-empty local suffix join.  The final shuffle is part of the distributional construction: the recursive outputs are produced in implementation order, whereas the target sequence is ordered i.i.d. without any dependence on the geometric block order.
+
+\section{Materialized implementations}
+\label{sec:anchor-materialized}
+
+The same disjoint decomposition supports three materialization levels.  Streaming reconstructs the relevant decomposition on demand.  PrefixCache stores an intermediate frontier.  Compiled stores all terminal atoms and a global index.
+
+\subsection{\texorpdfstring{\ANCHOR-Streaming}{ANCHOR-Streaming}}
+
+The streaming implementation stores the top-level sorted views and uses Count$_1$ or Sample$_1$ directly.  No persistent recursive decomposition is stored.  During one query, recursive views are built as stable lists of object references, used by a callback, and released when that callback returns.  The returned output sequence is not counted as auxiliary space.
+
+\subsection{\texorpdfstring{\ANCHOR-PrefixCache$(k)$}{ANCHOR-PrefixCache(k)}}
+
+For $0\le k\le d-1$, PrefixCache$(k)$ stores the frontier obtained after applying the anchored canonical decomposition through dimensions $1,2,\ldots,k$.  For $k=0$, the frontier consists of the single top-level block.  Let $\mathcal F_k$ be the set of frontier blocks.  For each block $u\in\mathcal F_k$, the data structure stores
+\[
+  \mathfrak V_{k+1}(A_u,B_u),
+  \qquad
+  m_u=|A_u|+|B_u|,
+  \qquad
+  W_u=|J^{(k+1)}(A_u,B_u)|.
+\]
+Blocks with $W_u=0$ may be removed from the sampling index, although their presence with zero weight would not affect correctness.  Repeated applications of Theorem~\ref{thm:anchor-decomposition} give the disjoint union
+\[
+  J=\biguplus_{u\in\mathcal F_k}J_u,
+  \qquad
+  J_u=J^{(k+1)}(A_u,B_u).
+\]
+Preprocessing builds an exact weighted index over the positive frontier weights $W_u$.
+
+A length-$t$ query first handles $t=0$ and the empty-frontier case.  Otherwise, for each output coordinate $r\in\{1,\ldots,t\}$, it independently chooses a frontier block $u_r$ from the weighted index.  Coordinates are then grouped by their selected block.  For every selected block $u$, the streaming suffix sampler is invoked once with quota
+\[
+  h_u=|\{r:u_r=u\}|.
+\]
+The returned sequence of length $h_u$ is written into those selected coordinates in increasing coordinate order.  No additional frontier-level shuffle is used: the frontier choices were made independently for the original output coordinates, so the coordinate order is already the target order.
+
+If
+\[
+  \mathcal F_k^+=\{u\in\mathcal F_k:h_u>0\},
+\]
+then the query time is
+\[
+  Q_k(t)=
+  O\left(
+    t+
+    \sum_{u\in\mathcal F_k^+}
+      m_u\log^{d-k-1}(m_u+1)
+  \right).
+\]
+The $t$ term accounts for frontier label draws, bucket management, and writing the selected output coordinates.
+
+\subsection{\texorpdfstring{\ANCHOR-Compiled}{ANCHOR-Compiled}}
+
+The compiled implementation expands the anchored decomposition through dimensions $1,2,\ldots,d-1$ and then replaces every terminal one-dimensional instance by its positive ComputeBaseAtoms$_d$ records.  Let $\mathcal T$ be the global list of positive terminal atoms.  Then
+\[
+  J=\biguplus_{\tau\in\mathcal T}\Omega_\tau,
+  \qquad
+  \omega_\tau=|\Omega_\tau|.
+\]
+Each terminal instance stores its local $L_d$-sorted arrays once.  Each atom stores an anchor object, a pointer to the terminal-local opposite array, the rank interval $[lo,hi)$ inside that local array, and the weight $hi-lo$.  Per-atom records do not copy the terminal-local arrays.  A global $L_d$-sorted array is not a valid substitute for the terminal-local opposite array: a globally ranked object may satisfy the last-dimensional rank condition while failing an earlier ownership or intersection condition that defines the terminal instance.
+
+The compiled structure builds one exact weighted index over the atom weights.  If the total atom weight is zero, a positive-length query returns \code{EMPTY-INSTANCE}; a zero-length query returns the empty sequence.  A length-$t$ query independently repeats the following operation for every output coordinate: choose an atom $\tau$ with probability $\omega_\tau/|J|$, draw a uniform offset in $[lo(\tau),hi(\tau))$, and decode the pair using the atom's terminal-local opposite array.  For every $p\in\Omega_\tau$,
+\[
+  \Pr[p]=\frac{\omega_\tau}{|J|}\cdot\frac{1}{\omega_\tau}=\frac{1}{|J|},
+\]
+so the coordinates are independent and uniform over $J$.
+
+\begin{center}
+\small
+\begin{tabular}{@{}>{\raggedright\arraybackslash}p{0.19\linewidth}>{\raggedright\arraybackslash}p{0.36\linewidth}>{\raggedright\arraybackslash}p{0.20\linewidth}>{\raggedright\arraybackslash}p{0.17\linewidth}@{}}
+\toprule
+Method & Persistent representation & Persistent space & Query time \\
+\midrule
+Streaming & top-level sorted views only & $O(N)$ auxiliary & $O(N\log^{d-1}(N+1)+t)$ \\
+PrefixCache$(k)$ & frontier suffix views and frontier weighted index & $O(N\log^k(N+1))$ & $Q_k(t)$ \\
+Compiled & terminal atoms and global weighted index & $O(N\log^{d-1}(N+1))$ & $O(t)$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{Correctness and complexity}
+\label{sec:anchor-guarantees}
+
+\begin{theorem}[Exact i.i.d. correctness]
+\label{thm:anchor-correctness}
+For constant dimension $d$, \ANCHOR-Streaming, \ANCHOR-PrefixCache$(k)$ for every $0\le k\le d-1$, and \ANCHOR-Compiled return an ordered sequence distributed exactly as $t$ independent uniform samples from $J$, under the exact-RAM model.  If $J=\emptyset$ and $t>0$, they return \code{EMPTY-INSTANCE}; if $t=0$, they return the empty sequence.
+\end{theorem}
+
+\begin{proof}
+For Streaming, use induction on the number of remaining dimensions.  The base case $\ell=d$ is Lemma~\ref{lem:anchor-base}.  At a level $\ell<d$, Lemma~\ref{lem:anchor-counting} gives exact node weights, and Theorem~\ref{thm:anchor-decomposition} partitions $J^{(\ell)}(A,B)$ into disjoint node-local suffix joins.  By the induction hypothesis, every recursive call Sample$_{\ell+1}$ is exact for its local suffix join.  Lemma~\ref{lem:anchor-quota} then implies that multinomial quota allocation over exact node weights, recursive sampling inside selected nodes, concatenation, and final shuffling produce an ordered sequence of independent uniform samples from $J^{(\ell)}(A,B)$.
+
+For PrefixCache$(k)$, the stored frontier is obtained by repeated applications of the same disjoint decomposition.  Each output coordinate independently chooses a frontier label with probability proportional to its exact weight and then uses the exact suffix sampler for the chosen frontier block.  Hence every coordinate is uniform over $J$, and the coordinates are independent.
+
+For Compiled, the frontier is refined all the way to terminal one-dimensional atoms.  Atom-proportional sampling followed by a uniform terminal-local offset gives probability $1/|J|$ to every join pair, independently for every output coordinate.  If all exact weights sum to zero, then the corresponding join is empty, and the algorithms return \code{EMPTY-INSTANCE} for positive query length.
+\end{proof}
+
+\begin{theorem}[Time and space]
+\label{thm:anchor-complexity}
+Let $N=|\mathcal R|+|\mathcal S|$ and treat $d$ as a constant.  After the top-level sorted views have been constructed, the following bounds hold in the exact-RAM model.
+\begin{enumerate}[leftmargin=1.6em,itemsep=2pt,topsep=2pt]
+\item \ANCHOR-Streaming answers a length-$t$ query in
+\[
+  O\bigl(N\log^{d-1}(N+1)+t\bigr)
+\]
+time and uses $O(N)$ auxiliary space, excluding the returned output sequence.
+\item \ANCHOR-PrefixCache$(k)$ preprocesses in $O(N\log^{d-1}(N+1))$ time, uses $O(N\log^k(N+1))$ persistent space, and answers a length-$t$ query in
+\[
+  O\left(
+    t+
+    \sum_{u\in\mathcal F_k^+}
+      m_u\log^{d-k-1}(m_u+1)
+  \right),
+\]
+where $\mathcal F_k^+$ is the set of frontier blocks selected at least once by the query.
+\item \ANCHOR-Compiled preprocesses in $O(N\log^{d-1}(N+1))$ time, uses $O(N\log^{d-1}(N+1))$ persistent space, and answers a length-$t$ query in $O(t)$ time.
+\end{enumerate}
+For raw unsorted input, add the initial $O(N\log N)$ sorting cost.  This cost is absorbed by the displayed bound when $d\ge2$.  For $d=1$, the algorithmic part after sorted views are available is $O(N+t)$, so the raw-input total is $O(N\log N+t)$.
+\end{theorem}
+
+\begin{proof}
+Let $C_r(m)$ be the time for Count on a suffix instance of size $m$ with $r$ remaining dimensions.  The base case is $C_1(m)=O(m)$ by the terminal scans.  For $r>1$, computing rank intervals costs $O(m\log(m+1))$.  The two RouteTree sweeps at the current level also cost $O(m\log(m+1))$: by Lemma~\ref{lem:anchor-per-depth}, each tree depth has total record volume $O(m)$, and the height is $O(\log(m+1))$.
+
+Let $m_z=|A_z|+|B_z|$ be the local size generated at node $z$ at the current level.  Lemma~\ref{lem:anchor-per-depth} gives
+\[
+  \sum_z m_z=O(m\log(m+1)),
+\]
+because the total local-record volume is $O(m)$ per depth and there are $O(\log(m+1))$ depths.  Using the induction hypothesis and $m_z\le m$,
+\[
+\begin{aligned}
+  C_r(m)
+  &\le O(m\log(m+1))+
+      \sum_z O\bigl(m_z\log^{r-2}(m_z+1)\bigr) \\
+  &\le O(m\log(m+1))+
+      O\bigl(\log^{r-2}(m+1)\sum_zm_z\bigr) \\
+  &=O\bigl(m\log^{r-1}(m+1)\bigr).
+\end{aligned}
+\]
+Thus exact counting over the top-level instance takes $O(N\log^{d-1}(N+1))$ time.
+
+Let $S_r(m,h)$ be the time for Sample on a suffix instance of size $m$ with $r$ remaining dimensions and requested length $h$, excluding storage of the returned sequence but including the work needed to write and shuffle it.  For $r=1$, BaseSample takes $O(m+h)$ time.  For $r>1$, Sample first performs NodeWeights, which has the same asymptotic cost as Count, then builds the quota distribution over $O(m)$ tree nodes, draws quotas in $O(m+h)$ time, computes subtree quotas in $O(m)$ time, and performs an active routing pass bounded by $O(m\log(m+1))$.  It recurses only on nodes with positive quota.  By the induction hypothesis,
+\[
+\begin{aligned}
+  S_r(m,h)
+  &\le O\bigl(m\log^{r-1}(m+1)\bigr)+O(h)
+     +\sum_{z:H_z>0}O\bigl(m_z\log^{r-2}(m_z+1)+H_z\bigr) \\
+  &\le O\bigl(m\log^{r-1}(m+1)\bigr)+O(h),
+\end{aligned}
+\]
+because $\sum_{z:H_z>0}m_z\le\sum_zm_z=O(m\log(m+1))$ and $\sum_zH_z=h$ at the current level.  At each dimension level, all active recursive calls have quotas summing to $h$, so shuffle and output-buffer work over the full recursion is $O(dh)=O(h)$ for constant $d$.  This proves the Streaming query-time bound.
+
+For Streaming space, RouteTree is implemented level by level, retaining only the current depth's routed buffers and the next depth's buffers.  Lemma~\ref{lem:anchor-per-depth} gives $O(m)$ records per depth.  The node-weight, quota, and selected-subtree-quota arrays at a current level also have $O(m)$ entries.  A recursive callback may hold the parent's current-level buffers while processing a child instance, but every child instance has size at most its parent instance, and the recursion depth is at most $d$.  Since $d$ and the number of sorted views per instance are constant, the auxiliary space is $O(N)$, excluding the output sequence.
+
+For PrefixCache$(k)$, let $M_j$ be the total stored view size after $j$ processed dimensions.  Processing one more dimension replaces each block of size $m_i$ by local blocks of total size $O(m_i\log(m_i+1))\le O(m_i\log(N+1))$.  Therefore
+\[
+  M_{j+1}\le O(M_j\log(N+1)),
+\]
+and $M_k=O(N\log^k(N+1))$.  Computing exact frontier weights costs
+\[
+  \sum_{u\in\mathcal F_k}O\bigl(m_u\log^{d-k-1}(m_u+1)\bigr)
+  \le O(N\log^{d-1}(N+1)),
+\]
+and building the frontier is within the same bound.  During a query, the persistent frontier index draws $t$ labels and buckets them in $O(t)$ time.  The suffix streaming sampler is invoked only on selected blocks, giving the displayed adaptive query bound.
+
+For Compiled, the decomposition is expanded through $d-1$ dimensions, so the total terminal-view size is $O(N\log^{d-1}(N+1))$.  Running ComputeBaseAtoms$_d$ on all terminal instances takes time linear in that terminal size, and the global weighted index over positive atoms has the same asymptotic size.  Each output coordinate performs one exact weighted atom draw and one exact uniform offset draw, so a length-$t$ query takes $O(t)$ time in the exact weighted-index model.
+\end{proof}
+
+\section{Implementation invariants}
+\label{sec:anchor-invariants}
+
+The following invariants give an implementation-level specification of the data represented by every recursive call.
+\begin{enumerate}[leftmargin=1.6em,itemsep=2pt,topsep=2pt]
+\item Objects are referenced by immutable identifiers.  Sorted views and atom records store references to objects, not copies of coordinate tuples.  Identical boxes remain distinct objects.
+\item The recursive suffix instance is always ordered as $(A,B)$.  The $A$-tree orientation uses $B$ as the source side only within the current routing pass; before recursion, the local view is returned to the standard order $(A_z,B_z)$.
+\item Source routing uses stable copying.  An unresolved source interval may be copied to both children.  Later routing uses stable splitting, so a later object appears in exactly one child at each depth.
+\item Canonical representatives are maximal by tree ancestry among nonempty real intervals contained in the source interval.  Dummy-only nodes are ignored throughout routing, counting, and sampling.
+\item A recursive view at level $\ell+1$ contains exactly the deeper keys $L_{\ell+1},\ldots,L_d,U_d$.  The current key $L_\ell$ is not part of the recursive view because dimension $\ell$ has already been certified by the anchor ownership rule.
+\item Node-local views passed to callbacks may be temporary buffers or iterators.  In the streaming variant they are released when the callback returns.  PrefixCache and Compiled store only the views or atom tables required by their declared materialization level.
+\item In Compiled, each terminal suffix instance stores its terminal-local $A^{L_d}$ and $B^{L_d}$ arrays once.  Atoms store pointers and rank intervals into those arrays.  Decoding an atom against a global $L_d$ array is not valid.
+\item Positive-length sampling checks the exact total weight before building or querying a weighted index.  Zero-length sampling returns the empty sequence without consulting the join size.
+\end{enumerate}
+
+\section{Summary}
+\label{sec:anchor-summary}
+
+\ANCHOR{} separates the geometric and probabilistic parts of exact join sampling.  Anchored ownership assigns every intersecting cross-color pair to a unique current-dimensional anchor.  Canonical dyadic covers turn each anchor's feasible opposite interval into disjoint recursive suffix instances with controlled total size.  Terminal atoms handle the last dimension directly.  Exact integer-weighted quota allocation, recursive sampling, and shuffling produce ordered with-replacement samples from the full join.  Streaming, PrefixCache, and Compiled differ only in how much of the same disjoint decomposition is stored persistently.
+
+\end{document}
