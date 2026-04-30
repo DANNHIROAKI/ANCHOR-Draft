@@ -1,0 +1,679 @@
+% !TEX program = pdflatex
+\documentclass[11pt]{article}
+
+\usepackage[a4paper,margin=1in]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage{microtype}
+\usepackage{amsmath,amssymb,mathtools}
+\usepackage{booktabs,longtable,tabularx,array}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage{hyperref}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue!60!black,
+  citecolor=blue!60!black,
+  urlcolor=blue!60!black,
+  pdftitle={Real Spatial-Join Datasets for Exact Sampling Benchmarks},
+  pdfauthor={}
+}
+
+\newcommand{\code}[1]{\ifmmode\text{\ttfamily #1}\else\texttt{#1}\fi}
+\newcommand{\Rrel}{\mathcal R}
+\newcommand{\Srel}{\mathcal S}
+\newcommand{\Jset}{\mathcal J}
+\newcommand{\GT}{\textsc{GT}}
+\newcommand{\PROP}{\textsc{Proposal}}
+\newcommand{\AABB}{\textsc{AABB}}
+\newcommand{\cmab}{\textsc{CMAB}}
+\newcommand{\geolife}{\textsc{GeoLife}}
+\newcommand{\coco}{\textsc{COCO}}
+\newcommand{\SpatialJoin}{\textsc{SpatialJoin}}
+\newcommand{\ms}{\mathrm{ms}}
+\newcommand{\cm}{\mathrm{cm}}
+\newcommand{\meters}{\mathrm{m}}
+\newcolumntype{Y}{>{\raggedright\arraybackslash}X}
+
+\title{Real Spatial-Join Datasets for Exact Join Sampling Benchmarks}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+This document describes three real-data benchmarks constructed for spatial join sampling:
+\cmab-Spatial-Join-0.08B, \geolife-Spatial-Join-0.15B, and \coco-Spatial-Join-1.23B.  All three datasets convert real objects into axis-aligned boxes or hyperrectangles and store the resulting relations in Parquet, but they stress different aspects of spatial join sampling.  \cmab{} is a two-dimensional building-footprint and influence-area benchmark derived from national-scale Chinese rooftop geometries.  \geolife{} is a three- and four-dimensional spatiotemporal encounter benchmark derived from GPS trajectories.  \coco{} is a billion-scale three-dimensional visual-object benchmark derived from MS COCO 2017 annotations and deterministic region-proposal boxes.  Together they provide complementary real workloads for testing algorithms that sample uniformly from large box-intersection joins without materializing the full join result.
+\end{abstract}
+
+\section{Purpose and common benchmark model}
+\label{sec:purpose}
+
+The synthetic data generator used in the main experiments is useful for controlled stress tests, but a spatial join sampler should also be evaluated on real data.  Real spatial data exhibits phenomena that are hard to capture with an independent synthetic box model: spatial clustering, hierarchical administrative structure, highly skewed object sizes, repeated trajectories, temporal bursts, correlated dimensions, image-level locality, and heavy overlap among candidate regions.  The three datasets described here were constructed to expose these effects while retaining a clean geometric representation.
+
+Each dataset is ultimately a collection of axis-aligned rectangles or hyperrectangles.  A record represents a box
+\[
+  b = \prod_{i=1}^{d} I_i(b),
+\]
+where each interval $I_i(b)$ is either a closed interval $[L_i(b),U_i(b)]$ or a half-open interval $[L_i(b),U_i(b))$, depending on the dataset.  A spatial join workload chooses two colored relations, usually denoted by $\Rrel$ and $\Srel$, and asks for the set
+\[
+  \Jset = \{(r,s)\in \Rrel\times\Srel : r \cap s \neq \varnothing\}.
+\]
+For join sampling, the desired output is not the full set $\Jset$, which may be far too large to materialize.  Instead, the task is to generate independent with-replacement samples that are exactly uniform over $\Jset$.
+
+The three datasets deliberately cover different regimes.
+\begin{itemize}[leftmargin=2em,itemsep=2pt]
+  \item \cmab{} gives a large two-dimensional geospatial workload with real building distributions and tunable influence radii.
+  \item \geolife{} gives three- and four-dimensional integer hyperrectangles whose intersections encode spatiotemporal encounters.
+  \item \coco{} gives a billion-scale half-open 3D workload with extremely high within-image overlap among generated proposal boxes.
+\end{itemize}
+
+\paragraph{Boundary convention.}
+The original algorithmic manuscript for ANCHOR and the KDS baseline use half-open boxes and strict overlap.  The datasets do not all use the same convention: \cmab{} and \geolife{} are specified with inclusive/closed intersection semantics, while \coco{} is specified with half-open semantics.  This distinction should be reported explicitly in experiments.  For integer closed intervals, as in \geolife{}, the closed predicate $[\ell,u]$ can be represented by a half-open interval $[\ell,u+1)$ whenever all coordinates live on an integer grid and $u+1$ is representable.  For floating-point closed intervals, as in \cmab{}, one may either implement the closed predicate directly or adopt a half-open convention for all compared systems; the choice should be stated because boundary-touching pairs are treated differently.
+
+\section{Dataset summary}
+\label{sec:summary}
+
+Table~\ref{tab:real-dataset-summary} summarizes the three benchmarks.  The row counts shown here follow the public dataset cards and builder manifests.  For \cmab{}, the Hugging Face dataset card exposes both level-wide configurations and province-specific configurations; therefore its catalog-level row count can double-count physical files across overlapping configurations.  The benchmark name ``0.08B'' should be read as the approximate disjoint four-level AABB scale of the released benchmark, while the public card currently reports 150,831,244 rows across all exposed configurations.
+
+\begin{table}[t]
+\centering
+\small
+\begin{tabularx}{\textwidth}{@{}lYYYY@{}}
+\toprule
+Dataset & Dimension and coordinates & Real source & Main geometric objects & Scale and role \\
+\midrule
+\cmab-Spatial-Join-0.08B & 2D projected meter coordinates & CMAB national-scale building rooftop geometries & Base building AABBs and expanded influence AABBs under four levels & Building/influence joins with urban skew, administrative partitions, and multi-radius selectivity. Public card reports 150,831,244 rows across configurations; dataset name reflects about 0.08B released AABB records. \\
+\addlinespace
+\geolife-Spatial-Join-0.15B & 3D $(x,y,t)$ and 4D $(x,y,z,t)$ integer coordinates; $x,y,z$ in centimeters, $t$ in epoch milliseconds & GeoLife GPS Trajectories v1.3 & Point-centered spatiotemporal hyperrectangles at three encounter levels & 148,923,081 rectangle records across six level--dimension groups; the public dataset card also exposes 18,670 trajectory dictionary rows, giving 148,941,751 total rows. Tests high-dimensional encounter joins over trajectories. \\
+\addlinespace
+\coco-Spatial-Join-1.23B & 3D half-open boxes $(x,y,z)$; image pixels plus an image-index $z$ slice & MS COCO 2017 annotations and Detectron2 RPN proposals & Ground-truth detection boxes and exactly 10,000 RPN proposal boxes per image & Public card reports 1,233,890,069 total rows across the rect and image subsets; the rect workload contains 1,232,870,000 proposals plus the COCO GT boxes. \\
+\bottomrule
+\end{tabularx}
+\caption{High-level comparison of the three real datasets.}
+\label{tab:real-dataset-summary}
+\end{table}
+
+\section{\cmab-Spatial-Join-0.08B}
+\label{sec:cmab}
+
+\subsection{Source and objective}
+
+\cmab-Spatial-Join-0.08B is a two-dimensional geospatial AABB benchmark derived from the CMAB building rooftop dataset, whose original paper describes a national-scale multi-attribute building dataset of China~\cite{CMABPaper,CMABFigshare,CMABBuilder,CMABHF}.  The benchmark converts each cleaned rooftop geometry into a base bounding rectangle and several expanded influence rectangles.  It is designed for evaluating spatial join systems and spatial join samplers on large real building distributions.
+
+The builder accepts GIS containers such as Shapefiles, GeoPackages, and FileGDB directories.  It scans the input tree deterministically, processes files in sorted order, and records traceability fields such as the relative source file and source feature id.  Administrative metadata is filled using CMAB metadata keyed by \code{StCity\_id}, with fallback path-based inference and deterministic placeholders when administrative fields are incomplete.
+
+\subsection{Coordinate system and geometry cleaning}
+
+Input geometries are interpreted according to the file's internal coordinate reference system.  If the CRS is missing or cannot be parsed, the builder falls back to WGS 1984 / EPSG:4326.  All output rectangles and derived geometry statistics are computed in a meter-based projected CRS; the default target CRS is an Albers Equal Area projection covering China.  The output coordinates are therefore in meters, which makes influence radii and geometry sizes directly interpretable.
+
+The builder accepts only polygonal rooftop geometries.  A feature is dropped if its geometry is null, is not a Polygon or MultiPolygon, cannot be made valid, fails projection, has non-finite projected bounds, or has a degenerate base bounding box.  Optional size filters can also drop geometries with suspiciously large projected bounding boxes.  These cleaning rules are important for join sampling because degenerate or non-finite rectangles can break both geometric predicates and exact sampler assumptions.
+
+\subsection{Base AABB and expanded influence AABB}
+
+Let $G$ be the projected rooftop geometry of a building.  Its base AABB is
+\[
+  \mathrm{AABB}(G) = [x_{\min},y_{\min},x_{\max},y_{\max}],
+\]
+with derived fields
+\[
+  w=x_{\max}-x_{\min},\qquad
+  h=y_{\max}-y_{\min},\qquad
+  a=wh,
+\]
+and center coordinates
+\[
+  c_x=(x_{\min}+x_{\max})/2,
+  \qquad
+  c_y=(y_{\min}+y_{\max})/2.
+\]
+
+For each building, the builder also creates expanded rectangles.  If the influence distance is $d$, the expanded AABB is
+\[
+  [e x_{\min}, e y_{\min}, e x_{\max}, e y_{\max}]
+  = [x_{\min}-d, y_{\min}-d, x_{\max}+d, y_{\max}+d].
+\]
+This represents an $L_\infty$ influence region: another base box intersects the expanded rectangle when it lies within the square influence envelope of the source building, subject to the chosen rectangle-intersection convention.
+
+Each cleaned building appears once in each of four level datasets.  The only fields that change across levels are the level id, the selected influence distance $d_m$, and the expanded coordinates.  The base AABB, building identifier, function class, and administrative fields remain fixed.
+
+\subsection{Function classes and influence levels}
+
+The output building function is normalized into five classes:
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+Code & Function class \\
+\midrule
+0 & Residential \\
+1 & Commercial \\
+2 & Public service \\
+3 & Office \\
+4 & Industry \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Influence distances depend on both function class and level.  The default distance table is shown in Table~\ref{tab:cmab-distances}.
+
+\begin{table}[t]
+\centering
+\small
+\begin{tabular}{lrrrr}
+\toprule
+Function class & Level 1 & Level 2 & Level 3 & Level 4 \\
+\midrule
+Residential    &  500 &  800 & 1000 &  1500 \\
+Commercial     &  800 & 1000 & 1500 &  2500 \\
+Public service & 1000 & 2000 & 3000 &  5000 \\
+Office         & 1000 & 2000 & 3000 &  5000 \\
+Industry       & 2000 & 5000 & 8000 & 10000 \\
+\bottomrule
+\end{tabular}
+\caption{Default \cmab{} influence distances in meters.}
+\label{tab:cmab-distances}
+\end{table}
+
+This table creates a natural selectivity gradient.  Level 1 is relatively local; Level 4 can generate much denser joins, especially for public-service, office, and industrial buildings.  The function-dependent radii are useful because they create heterogeneous box sizes even within the same spatial region.
+
+\subsection{Output layout and schema}
+
+The released dataset is organized as partitioned Parquet datasets:
+\begin{center}
+\begin{tabular}{l}
+\toprule
+\code{cmab\_spatial\_join/level\_1/} \\
+\code{cmab\_spatial\_join/level\_2/} \\
+\code{cmab\_spatial\_join/level\_3/} \\
+\code{cmab\_spatial\_join/level\_4/} \\
+\bottomrule
+\end{tabular}
+\end{center}
+Each level is partitioned by province.  The root directory also contains \code{dataset\_metadata.json}, \code{file\_manifest.parquet}, and \code{summary\_stats.parquet}.  The file manifest records shard paths, row counts, SHA256 hashes, column sets, and per-file bounding-box ranges.  The summary statistics table contains grouped statistics by level, province, and function code, including quantiles of base and expanded rectangle sizes.
+
+All four levels share the same schema.  The most important fields are listed in Table~\ref{tab:cmab-schema}.  The benchmark keeps both geometric and semantic attributes, allowing experiments to be run globally, by province, by city, by function, or by level.
+
+\begin{longtable}{@{}p{0.25\textwidth}p{0.25\textwidth}p{0.40\textwidth}@{}}
+\caption{Main \cmab{} fields.}\label{tab:cmab-schema}\\
+\toprule
+Field group & Fields & Meaning \\
+\midrule
+\endfirsthead
+\toprule
+Field group & Fields & Meaning \\
+\midrule
+\endhead
+Identifiers & \code{building\_uid}, \code{shape\_id} & Stable building identifier and source shape identifier.  The 64-bit UID is derived from administrative keys and shape id using xxHash64. \\
+Categories & \code{func}, \code{func\_code}, \code{level}, \code{d\_m} & Normalized function class, numeric function code, workload level, and influence distance in meters. \\
+Administrative metadata & \code{province}, \code{city}, \code{district}, \code{admin\_level}, \code{stcity\_id}, \code{block\_id} & Region attributes for partitioned and region-filtered workloads. \\
+Base AABB & \code{xmin}, \code{ymin}, \code{xmax}, \code{ymax} & Projected rooftop bounding rectangle in meters. \\
+Base geometry statistics & \code{bbox\_w\_m}, \code{bbox\_h\_m}, \code{bbox\_area\_m2}, \code{cx}, \code{cy} & Width, height, area, and center of the base rectangle. \\
+Expanded AABB & \code{exmin}, \code{eymin}, \code{exmax}, \code{eymax} & Influence rectangle for the corresponding level. \\
+Source attributes & \code{height\_m}, \code{bu\_area\_m2} & Building height and area attributes, when available. \\
+Traceability & \code{source\_file}, \code{source\_fid} & Input file path and source feature id. \\
+\bottomrule
+\end{longtable}
+
+\subsection{Recommended join workloads}
+\label{subsec:cmab-workloads}
+
+The \cmab{} benchmark supports several natural workloads.
+
+\paragraph{Influence-to-base join.}
+For a fixed level $\ell$, define the left relation $\Rrel_\ell$ to be the expanded AABBs at level $\ell$, and the right relation $\Srel$ to be the base AABBs.  A join pair $(r,s)$ means that the base rectangle of building $s$ intersects the influence rectangle of building $r$.  This is the most direct interpretation of the dataset: it samples buildings affected by, or spatially close to, another building under a function-dependent influence distance.
+
+\paragraph{Influence self-join.}
+For a fixed level $\ell$, define both sides using expanded AABBs and filter out identical building ids.  This measures overlap among influence regions.  It is usually denser than the influence-to-base join and is therefore a useful stress test for output-cardinality-sensitive samplers.
+
+\paragraph{Region-filtered joins.}
+The same tasks can be run after filtering by province, city, district, or \code{stcity\_id}.  This allows experiments to evaluate whether a sampler scales smoothly across regions of very different density.  For example, dense coastal provinces and large metropolitan regions are likely to generate different overlap structures from sparse western or rural regions.
+
+\paragraph{Function-filtered joins.}
+Because function classes have different radii, experiments can also filter or color records by function.  Examples include Residential-to-Commercial influence sampling, Industry-to-Base influence sampling, or a full cross-function matrix of join workloads.
+
+\subsection{Why \cmab{} is useful for spatial join sampling}
+
+\cmab{} stresses two-dimensional real geospatial indexing at large scale.  The main sources of difficulty are not high dimension, but spatial skew and heterogeneous selectivity.  Buildings cluster strongly in cities; provinces differ by several orders of magnitude in row count; function-dependent influence distances produce multiple box-size distributions in the same dataset; and the four levels create a systematic selectivity sweep.  A sampler that works well on \cmab{} should handle both small local joins and high-density urban joins without relying on uniform spatial distributions.
+
+\section{\geolife-Spatial-Join-0.15B}
+\label{sec:geolife}
+
+\subsection{Source and objective}
+
+\geolife-Spatial-Join-0.15B is derived from Microsoft Research's GeoLife GPS Trajectories v1.3~\cite{GeoLifeMicrosoft,ZhengGeoLife,GeoLifeBuilder,GeoLifeHF}.  The source data contains GPS trajectories collected by 182 users.  Each trajectory point includes latitude, longitude, altitude, and timestamp information.  The builder transforms trajectory points into axis-aligned hyperrectangles so that the query ``are two points close in space and time?'' becomes a pure box-intersection join.
+
+The benchmark contains six groups:
+\begin{itemize}[leftmargin=2em,itemsep=2pt]
+  \item 3D groups over $(x,y,t)$ for levels 1, 2, and 3;
+  \item 4D groups over $(x,y,z,t)$ for levels 1, 2, and 3, using only points with valid altitude.
+\end{itemize}
+
+The public artifact exposes 24,876,977 rows for each 3D level and 24,764,050 rows for each 4D level, yielding 148,923,081 rectangle records.  Including the 18,670-row trajectory dictionary, the Hugging Face row total is 148,941,751.  The 3D groups cover 182 users and 18,670 trajectories; the 4D groups cover 182 users and 18,645 trajectories after altitude filtering.
+
+\subsection{Point extraction}
+
+The builder expects the extracted GeoLife 1.3 directory containing \code{Data/}, with user directories such as \code{Data/000/}.  It recursively collects all \code{.plt} files, normalizes paths relative to \code{Data/}, sorts the paths lexicographically, and processes files in that deterministic order.
+
+For each \code{.plt} file, the first six header lines are skipped.  Each subsequent line is parsed as a GPS point.  The relevant fields are latitude, longitude, altitude in feet, date, and time.  A point is retained only if latitude is in $[-90,90]$, longitude is in $[-180,180]$, and the timestamp can be parsed.  Each accepted point receives:
+\begin{itemize}[leftmargin=2em,itemsep=2pt]
+  \item \code{user\_id}, parsed from the user directory;
+  \item \code{traj\_src}, the normalized trajectory path;
+  \item \code{traj\_id}, a deterministic hash of \code{traj\_src};
+  \item \code{point\_idx}, the point index within the trajectory;
+  \item latitude, longitude, altitude, and encoded time.
+\end{itemize}
+
+\subsection{Coordinate encoding}
+
+The spatial coordinates are projected from WGS84 / EPSG:4326 to Web Mercator / EPSG:3857.  The resulting meter coordinates are converted to integer centimeters:
+\[
+  x_{\cm} = \operatorname{round\_away\_from\_zero}(100x_{\meters}),
+  \qquad
+  y_{\cm} = \operatorname{round\_away\_from\_zero}(100y_{\meters}).
+\]
+The timestamp is interpreted as UTC and converted to Unix epoch milliseconds:
+\[
+  t_{\ms}=\lfloor 1000\cdot \mathrm{timestamp\_seconds}\rfloor.
+\]
+Altitude is read in feet and converted to centimeters:
+\[
+  z_{\cm}=\operatorname{round\_away\_from\_zero}(100\cdot 0.3048\cdot \mathrm{alt}_{ft}).
+\]
+A point is valid for the 4D groups only if \code{alt\_ft != -777} and the converted altitude lies in $[-500\,\meters,10000\,\meters]$.
+
+This integer encoding is a major advantage for exact sampling experiments.  It removes floating-point ambiguity from the generated hyperrectangle endpoints and makes boundary transformations explicit.
+
+\subsection{Encounter levels and box construction}
+
+Each level is defined by a spatial threshold $\Delta d$ and a temporal threshold $\Delta t$.  A point centered at $(x,y,t)$ becomes a 3D box with spatial half-width $r_d=\Delta d/2$ and temporal half-width $r_t=\Delta t/2$:
+\[
+\begin{aligned}
+  x_{\min} &= x_{\cm}-r_{d,\cm}, & x_{\max} &= x_{\cm}+r_{d,\cm},\\
+  y_{\min} &= y_{\cm}-r_{d,\cm}, & y_{\max} &= y_{\cm}+r_{d,\cm},\\
+  t_{\min} &= t_{\ms}-r_{t,\ms}, & t_{\max} &= t_{\ms}+r_{t,\ms}.
+\end{aligned}
+\]
+For 4D records, the box additionally includes
+\[
+  z_{\min}=z_{\cm}-r_{d,\cm},
+  \qquad
+  z_{\max}=z_{\cm}+r_{d,\cm}.
+\]
+The fixed level table is shown in Table~\ref{tab:geolife-levels}.
+
+\begin{table}[t]
+\centering
+\small
+\begin{tabular}{rrrrr}
+\toprule
+Level & $\Delta d$ (m) & $r_{d,\cm}$ & $\Delta t$ (s) & $r_{t,\ms}$ \\
+\midrule
+1 &  20 &  1,000 &   60 &   30,000 \\
+2 &  50 &  2,500 &  300 &  150,000 \\
+3 & 200 & 10,000 & 1200 &  600,000 \\
+\bottomrule
+\end{tabular}
+\caption{\geolife{} encounter thresholds and half-widths.}
+\label{tab:geolife-levels}
+\end{table}
+
+The dataset uses closed intervals.  Therefore, two 3D boxes at the same level intersect if and only if their underlying points satisfy
+\[
+  |x_1-x_2|\le \Delta d,
+  \qquad
+  |y_1-y_2|\le \Delta d,
+  \qquad
+  |t_1-t_2|\le \Delta t.
+\]
+For 4D, the condition additionally includes $|z_1-z_2|\le \Delta d$.  Thus the rectangle intersection join exactly implements an $L_\infty$ spatiotemporal encounter predicate.
+
+\subsection{Output layout and schema}
+
+The output directory has the following logical structure:
+\begin{center}
+\begin{tabular}{l}
+\toprule
+\code{geolife\_spatial\_join/manifest.json} \\
+\code{geolife\_spatial\_join/dims=3/level=1/part-*.parquet} \\
+\code{geolife\_spatial\_join/dims=3/level=2/part-*.parquet} \\
+\code{geolife\_spatial\_join/dims=3/level=3/part-*.parquet} \\
+\code{geolife\_spatial\_join/dims=4/level=1/part-*.parquet} \\
+\code{geolife\_spatial\_join/dims=4/level=2/part-*.parquet} \\
+\code{geolife\_spatial\_join/dims=4/level=3/part-*.parquet} \\
+\code{geolife\_spatial\_join/dict/trajectories.parquet} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The rectangle schema is compact and integer-valued.  Common fields include \code{rect\_id:int64}, \code{traj\_id:int64}, \code{user\_id:int32}, and \code{point\_idx:int32}.  The 3D bounds are \code{x\_min\_cm}, \code{x\_max\_cm}, \code{y\_min\_cm}, \code{y\_max\_cm}, \code{t\_min\_ms}, and \code{t\_max\_ms}.  The 4D groups additionally include \code{z\_min\_cm} and \code{z\_max\_cm}.  The trajectory dictionary maps \code{traj\_id} back to \code{traj\_src}, user id, number of retained points, and time span.
+
+The manifest records immutable build parameters, including CRS choices, units, threshold levels, altitude-validity rules, exact row counts, file lists, and hashing rules.  The deterministic id scheme uses xxHash64 with seed 0.
+
+\subsection{Recommended join workloads}
+
+\paragraph{All-points encounter join.}
+For a fixed \code{dims} and \code{level}, join the records against themselves and filter out identical \code{rect\_id}.  This samples pairs of trajectory points whose centers are close in the $L_\infty$ spatiotemporal sense.  If the goal is to avoid duplicate symmetric pairs, one can impose \code{rect\_id\_left < rect\_id\_right}; if the algorithm expects a cross-color join, use two logical copies of the relation and sample ordered pairs.
+
+\paragraph{Cross-user encounter join.}
+Filter the self-join by \code{user\_id\_left != user\_id\_right}.  This converts the workload into a cross-user encounter benchmark and avoids trivial matches between adjacent points from the same trajectory.  It is especially relevant for evaluating samplers under semantically meaningful encounters.
+
+\paragraph{Trajectory-pair join.}
+Use the trajectory dictionary to choose subsets of trajectories or user groups.  For example, one can join points from a selected set of users against another selected set, or join weekday trajectories against weekend trajectories if such labels are added externally.
+
+\paragraph{Dimensionality comparison.}
+Run the same level in 3D and 4D.  The 4D version adds altitude and therefore changes both selectivity and index complexity.  This is useful for comparing algorithms whose running time depends sharply on dimension.
+
+\subsection{Why \geolife{} is useful for spatial join sampling}
+
+\geolife{} is a high-dimensional real workload with strong temporal and spatial correlation.  Consecutive points in a trajectory are near each other; users revisit locations; and activity bursts create dense local neighborhoods in time.  The three levels provide a controlled selectivity sweep, while the 3D/4D split tests sensitivity to dimensionality.  Because all coordinates are integer-encoded, it is also a good dataset for exact implementations of closed or discretized half-open semantics.
+
+\section{\coco-Spatial-Join-1.23B}
+\label{sec:coco}
+
+\subsection{Source and objective}
+
+\coco-Spatial-Join-1.23B is a billion-scale visual spatial join benchmark built from MS COCO 2017 detection data and deterministic region proposals generated by Detectron2 Faster R-CNN with a ResNet-50-FPN backbone~\cite{COCO,Detectron2,COCOBuilder,COCOHF}.  The benchmark uses the \code{train2017} and \code{val2017} image splits, for a total of 118,287 training images, 5,000 validation images, and 123,287 images overall.  For each image, it stores two types of rectangles:
+\begin{itemize}[leftmargin=2em,itemsep=2pt]
+  \item \GT{} boxes, converted from COCO detection annotations, including annotations with \code{iscrowd} equal to either 0 or 1;
+  \item \PROP{} boxes, generated from the RPN output of the Faster R-CNN model, with exactly 10,000 proposals per image.
+\end{itemize}
+
+The result is a very large collection of image-plane boxes with strong within-image overlap.  This makes it an excellent stress test for samplers that must handle large join cardinalities and repeated sampling from highly overlapping local instances.
+
+\subsection{3D half-open representation}
+
+Each object is represented as a three-dimensional half-open box
+\[
+  b=[x_{\min},x_{\max})\times[y_{\min},y_{\max})\times[z_{\min},z_{\max}).
+\]
+The $x$ and $y$ coordinates are float32 coordinates in the original COCO image pixel coordinate system.  The $z$ coordinate is an image slice.  Images are ordered deterministically: all \code{train2017} images first, then all \code{val2017} images, with COCO image ids sorted ascending inside each split.  If an image has index \code{z\_idx}, every object from that image receives
+\[
+  z_{\min}=\code{z\_idx},
+  \qquad
+  z_{\max}=\code{z\_idx}+1.
+\]
+Thus boxes from different images never intersect along the $z$ dimension, while all boxes from the same image share the same unit $z$ interval.
+
+The intersection predicate is strict half-open overlap:
+\[
+  \max(L_i(b),L_i(b')) < \min(U_i(b),U_i(b'))
+  \quad\text{for every } i\in\{x,y,z\}.
+\]
+Boundary touching does not count as an intersection.  This matches the half-open semantics used by ANCHOR and KDS without requiring any boundary conversion.
+
+\subsection{Proposal generation and determinism}
+
+The proposal source is the RPN proposal generator of Detectron2 Faster R-CNN, not the final ROI-head detections.  The builder records the model configuration \code{COCO-Detection/faster\_rcnn\_R\_50\_FPN\_3x.yaml}, the checkpoint URL and SHA256, PyTorch and Detectron2 versions, CUDA/cuDNN versions, hardware information, and deterministic settings.  The public build manifest records \code{seed\_root=12345}, disables nondeterministic switches such as cuDNN benchmarking and TF32, and enables deterministic algorithm settings.
+
+To obtain a large high-overlap proposal pool, the RPN test configuration uses
+\[
+\code{PRE\_NMS\_TOPK\_TEST}=20000,
+\quad
+\code{POST\_NMS\_TOPK\_TEST}=20000,
+\quad
+\code{NMS\_THRESH}=1.0.
+\]
+The implementation verifies that the candidate pool contains at least 10,000 boxes for each image.  Candidate proposals are mapped back to the original image coordinate system, clipped to image bounds, normalized to finite float32 coordinates, sorted deterministically, and truncated to the top 10,000.  The stored proposal score is
+\[
+  \sigma(\mathrm{objectness\_logit}) = \frac{1}{1+\exp(-\mathrm{logit})},
+\]
+stored as float32.  The deterministic sorting key is score descending, then the tuple \((x_{\min},y_{\min},x_{\max},y_{\max})\) ascending, then original candidate index ascending.  The resulting proposal rank is \code{1..10000} within each image.
+
+\subsection{Coordinate normalization}
+
+Before writing, every GT or proposal box must satisfy
+\[
+  0\le x_{\min}<x_{\max}\le \mathrm{width},
+  \qquad
+  0\le y_{\min}<y_{\max}\le \mathrm{height}.
+\]
+Non-finite values are handled deterministically before clipping.  Degenerate boxes are repaired using float32 \code{nextafter}: if \code{max\_x <= min\_x}, then \code{max\_x} is advanced to the next representable float above \code{min\_x}; if this exceeds the image boundary, \code{max\_x} is set to the boundary and \code{min\_x} is moved to the previous representable float.  The same rule is applied to $y$.  This normalization guarantees strict half-open box validity.
+
+\subsection{Output layout and schema}
+
+The output structure is
+\begin{center}
+\begin{tabular}{l}
+\toprule
+\code{coco-spatial-1b/meta/build\_manifest.json} \\
+\code{coco-spatial-1b/meta/stats.json} \\
+\code{coco-spatial-1b/data/images.parquet} \\
+\code{coco-spatial-1b/data/rects/train2017/shard-*.parquet} \\
+\code{coco-spatial-1b/data/rects/val2017/shard-*.parquet} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Each shard covers a contiguous range of at most 1,024 images by \code{z\_idx}; train and validation shards are not mixed.  Shard file names are based on the starting image index, for example \code{shard-000000.parquet} and \code{shard-001024.parquet}.  Rows inside each rect shard are sorted by \code{rect\_id}.
+
+The image table has one row per image with fields \code{split}, \code{coco\_image\_id}, \code{file\_name}, \code{width}, \code{height}, and \code{z\_idx}.  The rect table has the fields in Table~\ref{tab:coco-schema}.
+
+\begin{longtable}{@{}p{0.25\textwidth}p{0.25\textwidth}p{0.40\textwidth}@{}}
+\caption{Main \coco{} rect fields.}\label{tab:coco-schema}\\
+\toprule
+Field & Type & Meaning \\
+\midrule
+\endfirsthead
+\toprule
+Field & Type & Meaning \\
+\midrule
+\endhead
+\code{rect\_id} & int64 & Deterministic rectangle id. \\
+\code{z\_min}, \code{z\_max} & int32 & Image slice interval, with \code{z\_max = z\_min + 1}. \\
+\code{min\_x}, \code{min\_y}, \code{max\_x}, \code{max\_y} & float32 & Half-open image-plane box in original pixel coordinates. \\
+\code{type} & int8 & 0 for GT, 1 for proposal. \\
+\code{rank} & int16 & 0 for GT; 1 through 10,000 for proposals. \\
+\code{score} & float32 & 1.0 for GT; sigmoid of RPN objectness logit for proposals. \\
+\code{category\_id} & int16 & COCO category id for GT; -1 for proposals. \\
+\code{iscrowd} & int8 & COCO \code{iscrowd} for GT; 0 for proposals. \\
+\code{coco\_ann\_id} & int64 & COCO annotation id for GT; -1 for proposals. \\
+\code{coco\_image\_id} & int32 & Original COCO image id. \\
+\bottomrule
+\end{longtable}
+
+The deterministic rectangle id scheme uses a fixed stride of 20,000 per image.  For image index $z$, define
+\[
+  \mathrm{base}=20000z.
+\]
+GT boxes are sorted by COCO annotation id and assigned ids \(\mathrm{base}+0,\mathrm{base}+1,\ldots\).  Proposal boxes are assigned
+\[
+  \code{rect\_id}=\mathrm{base}+10000+(\code{rank}-1).
+\]
+The stride separates GT ids from proposal ids and makes ids invertible by image.
+
+The public build manifest records 123,287 images and 1,232,870,000 proposals.  The Hugging Face card reports 1,233,890,069 total rows across the public subsets, with an \code{images} subset of about 123k rows and a \code{rects} subset of about 1.23B rows.  Combining these public counts implies 896,782 GT annotation boxes in the rect relation:
+\[
+  1{,}233{,}890{,}069 - 1{,}232{,}870{,}000 - 123{,}287 = 896{,}782.
+\]
+
+\subsection{Recommended join workloads}
+
+\paragraph{Task A: GT $\times$ Proposal.}
+Let $\Rrel$ be all records with \code{type=0}, and let $\Srel$ be all records with \code{type=1}.  The join samples pairs where a ground-truth object and an RPN proposal strictly overlap in the same image.  This workload is semantically close to object-detection proposal recall and produces a very large but structured join.
+
+\paragraph{Task B: Proposal $\times$ Proposal.}
+For each image, split proposals by rank:
+\[
+  \Rrel=\{\code{type=1},\ 1\le \code{rank}\le 5000\},
+  \qquad
+  \Srel=\{\code{type=1},\ 5001\le \code{rank}\le 10000\}.
+\]
+The join samples pairs of proposals that overlap within the same image.  This is a pure high-overlap stress test.  The $z$ dimension makes it possible to view the global workload as a disjoint union of per-image joins, but algorithms may also run on the full 3D relation.
+
+\paragraph{Split-specific workloads.}
+The same tasks can be run separately on \code{train2017}, \code{val2017}, or selected shard ranges.  Since shards are continuous in \code{z\_idx}, shard subsets are convenient for scaling experiments.
+
+\subsection{Why \coco{} is useful for spatial join sampling}
+
+\coco{} is the largest of the three datasets and has a very different structure from classical geospatial data.  Its boxes live in small image coordinate systems but are separated by the $z$ dimension.  Within a single image, proposals are deliberately numerous and highly overlapping, so local join cardinalities can be very large.  Across images, there is no overlap at all.  This creates a clean block-diagonal geometry: easy to partition by image, but hard within each image.  A good sampler should exploit or survive this structure without materializing all proposal-proposal or GT-proposal intersections.
+
+\section{Experimental use in spatial join sampling}
+\label{sec:experimental-use}
+
+\subsection{Constructing colored relations}
+
+Most exact join samplers are specified for two colored relations $\Rrel$ and $\Srel$.  The three datasets naturally produce such relations in different ways.
+
+\begin{itemize}[leftmargin=2em,itemsep=2pt]
+  \item In \cmab{}, use expanded boxes as $\Rrel$ and base boxes as $\Srel$ for influence-to-base joins.  For self-join style workloads, create two logical copies and filter identical building ids when appropriate.
+  \item In \geolife{}, use two logical copies of the same level/dimension table for encounter joins, or split records by user id, trajectory id, time range, or user groups to form genuine cross-color joins.
+  \item In \coco{}, use semantic record types directly: GT versus proposals for Task A, and top-half versus bottom-half proposals for Task B.
+\end{itemize}
+
+When sampling ordered pairs, be explicit about whether symmetric pairs are both retained.  For example, a self-join over one table can produce both $(a,b)$ and $(b,a)$ if implemented as a cross-color join over two copies.  If unordered pairs are desired, impose a strict id order and adjust all systems consistently.
+
+\subsection{Reporting join semantics}
+
+Every experiment should report the interval convention used by the implementation.  A recommended reporting table is:
+\begin{center}
+\small
+\begin{tabularx}{\textwidth}{@{}lYY@{}}
+\toprule
+Dataset & Native convention & Implementation note \\
+\midrule
+\cmab{} & Inclusive rectangle intersection in the builder workload description & State whether experiments use closed intersection or a unified half-open convention. \\
+\geolife{} & Closed integer intervals & Can be converted exactly to half-open intervals by replacing $u$ with $u+1$ on each integer dimension. \\
+\coco{} & Half-open strict overlap & Directly matches half-open algorithm manuscripts. \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+This matters most for boundary-touching cases.  Boundary contacts may be rare in continuous geospatial data, but they are not negligible by definition in integer-encoded data.
+
+\subsection{Recommended metrics}
+
+For each dataset and workload, report at least:
+\begin{itemize}[leftmargin=2em,itemsep=2pt]
+  \item number of records on each side, $|\Rrel|$ and $|\Srel|$;
+  \item dimension $d$ and interval convention;
+  \item estimated or exact join cardinality $|\Jset|$, when available;
+  \item preprocessing time and memory;
+  \item persistent index size;
+  \item query time for sample sizes $t$ over several orders of magnitude;
+  \item whether the sampler returns i.i.d. with-replacement ordered samples;
+  \item validation method for uniformity and duplicate-with-replacement behavior.
+\end{itemize}
+
+For very large workloads, exact $|\Jset|$ may itself be expensive.  In that case, report the counting method used by the sampler, the baseline counter, or an independent estimator.  The key is to separate index-construction cost, counting cost, and per-sample cost.
+
+\subsection{Scaling protocols}
+
+The datasets support natural scale-down and scale-up protocols.
+
+\paragraph{\cmab{} scaling.}
+Scale by level, province, city, or function class.  Level controls box expansion and selectivity; province controls row count and spatial density; function filters control radius distributions.
+
+\paragraph{\geolife{} scaling.}
+Scale by dimension, level, user subset, or trajectory subset.  The 3D/4D comparison isolates dimensionality effects; the three levels isolate threshold/selectivity effects.
+
+\paragraph{\coco{} scaling.}
+Scale by split, by shard range, or by image subsets.  Because shards are continuous in \code{z\_idx}, they provide reproducible prefixes or ranges.  Task B can be made even denser by changing the rank split, although the default benchmark split is ranks 1--5000 versus 5001--10000.
+
+\section{Comparison of benchmark regimes}
+\label{sec:comparison}
+
+The three datasets are complementary rather than redundant.
+
+\begin{itemize}[leftmargin=2em,itemsep=2pt]
+  \item \cmab{} tests large two-dimensional geospatial joins with real administrative and urban skew.  It is close to classical spatial database workloads.
+  \item \geolife{} tests high-dimensional spatiotemporal joins.  It is the most natural benchmark for algorithms whose complexity depends on dimension and for predicates involving both spatial and temporal thresholds.
+  \item \coco{} tests billion-scale high-overlap joins.  It is not a geographic dataset, but it is a very strong box-intersection workload because object proposals create many overlapping rectangles per image.
+\end{itemize}
+
+The expected strengths and risks of a spatial join sampler differ by dataset.  On \cmab{}, spatial partitioning and region-level locality matter.  On \geolife{}, temporal locality, repeated trajectory points, and integer boundary handling matter.  On \coco{}, the dominant challenge is the enormous number of proposal boxes and the dense local joins within each image slice.
+
+\section{Suggested manuscript text}
+\label{sec:suggested-text}
+
+The following paragraph can be used directly in an experimental section.
+
+\medskip
+\noindent
+\emph{Real datasets.}
+We evaluate on three real spatial-join benchmarks constructed from independent application domains.  \cmab-Spatial-Join-0.08B is a two-dimensional building benchmark derived from CMAB rooftop geometries; each building contributes a base AABB and four level-dependent influence AABBs, with influence distances determined by building function class.  \geolife-Spatial-Join-0.15B is a spatiotemporal encounter benchmark derived from GeoLife GPS trajectories; each trajectory point is encoded as a 3D $(x,y,t)$ or 4D $(x,y,z,t)$ integer hyperrectangle, and each intersection corresponds exactly to proximity under an $L_\infty$ distance/time threshold.  \coco-Spatial-Join-1.23B is a billion-scale visual benchmark derived from MS COCO 2017; it stores ground-truth detection boxes and exactly 10,000 deterministic Detectron2 RPN proposals per image as half-open 3D boxes using the image index as a separating $z$ coordinate.  These datasets cover two-dimensional geospatial skew, high-dimensional spatiotemporal correlation, and billion-scale high-overlap image-local joins, respectively.
+
+\section{References and data access}
+\label{sec:references-access}
+
+The three released datasets and their reference builders are available at the following locations:
+\begin{itemize}[leftmargin=2em,itemsep=2pt]
+  \item \cmab{} builder: \url{https://github.com/DANNHIROAKI/CMAB-Spatial-Join-0.08B-Builder}; dataset: \url{https://huggingface.co/datasets/DannHiroaki/CMAB-Spatial-Join-0.08B}.
+  \item \geolife{} builder: \url{https://github.com/DANNHIROAKI/Geolife-Spatial-Join-0.15B-Builder}; dataset: \url{https://huggingface.co/datasets/DannHiroaki/Geolife-Spatial-Join-0.15B}.
+  \item \coco{} builder: \url{https://github.com/DANNHIROAKI/COCO-Spatial-Join-1B-Builder}; dataset: \url{https://huggingface.co/datasets/DannHiroaki/COCO-Spatial-Join-1.23B}.
+\end{itemize}
+
+\begin{thebibliography}{99}
+
+\bibitem{CMABPaper}
+Y. Zhang, H. Zhao, and Y. Long.
+\newblock CMAB: A Multi-Attribute Building Dataset of China.
+\newblock \emph{Scientific Data}, 12:430, 2025.
+\newblock DOI: \url{https://doi.org/10.1038/s41597-025-04730-5}.
+
+\bibitem{CMABFigshare}
+Y. Zhang, H. Zhao, and Y. Long.
+\newblock CMAB--The World's First National-Scale Multi-Attribute Building Dataset.
+\newblock Figshare dataset, 2025.
+\newblock DOI: \url{https://doi.org/10.6084/m9.figshare.27992417}.
+
+\bibitem{GeoLifeMicrosoft}
+Microsoft Research.
+\newblock GeoLife GPS Trajectories v1.3.
+\newblock Dataset and user guide, 2011.
+\newblock \url{https://www.microsoft.com/en-us/research/publication/geolife-gps-trajectory-dataset-user-guide/}.
+
+\bibitem{ZhengGeoLife}
+Y. Zheng, X. Xie, and W.-Y. Ma.
+\newblock GeoLife: A Collaborative Social Networking Service among User, Location and Trajectory.
+\newblock \emph{IEEE Data Engineering Bulletin}, 33(2):32--39, 2010.
+
+\bibitem{COCO}
+T.-Y. Lin, M. Maire, S. Belongie, L. Bourdev, R. Girshick, J. Hays, P. Perona, D. Ramanan, C. L. Zitnick, and P. Doll\'ar.
+\newblock Microsoft COCO: Common Objects in Context.
+\newblock In \emph{European Conference on Computer Vision}, 2014.
+\newblock \url{https://arxiv.org/abs/1405.0312}.
+
+\bibitem{Detectron2}
+Y. Wu, A. Kirillov, F. Massa, W.-Y. Lo, and R. Girshick.
+\newblock Detectron2.
+\newblock \url{https://github.com/facebookresearch/detectron2}, 2019.
+
+\bibitem{CMABBuilder}
+DANNHIROAKI.
+\newblock CMAB-Spatial-Join-0.08B-Builder.
+\newblock \url{https://github.com/DANNHIROAKI/CMAB-Spatial-Join-0.08B-Builder}.
+
+\bibitem{CMABHF}
+DANNHIROAKI.
+\newblock CMAB-Spatial-Join-0.08B.
+\newblock Hugging Face dataset.
+\newblock \url{https://huggingface.co/datasets/DannHiroaki/CMAB-Spatial-Join-0.08B}.
+
+\bibitem{GeoLifeBuilder}
+DANNHIROAKI.
+\newblock Geolife-Spatial-Join-0.15B-Builder.
+\newblock \url{https://github.com/DANNHIROAKI/Geolife-Spatial-Join-0.15B-Builder}.
+
+\bibitem{GeoLifeHF}
+DANNHIROAKI.
+\newblock Geolife-Spatial-Join-0.15B.
+\newblock Hugging Face dataset.
+\newblock \url{https://huggingface.co/datasets/DannHiroaki/Geolife-Spatial-Join-0.15B}.
+
+\bibitem{COCOBuilder}
+DANNHIROAKI.
+\newblock COCO-Spatial-Join-1B-Builder.
+\newblock \url{https://github.com/DANNHIROAKI/COCO-Spatial-Join-1B-Builder}.
+
+\bibitem{COCOHF}
+DANNHIROAKI.
+\newblock COCO-Spatial-Join-1.23B.
+\newblock Hugging Face dataset.
+\newblock \url{https://huggingface.co/datasets/DannHiroaki/COCO-Spatial-Join-1.23B}.
+
+\end{thebibliography}
+
+\end{document}
