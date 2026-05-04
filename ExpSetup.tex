@@ -1,0 +1,1068 @@
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,mathtools}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{longtable}
+\usepackage{array}
+\usepackage{makecell}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage[hidelinks]{hyperref}
+
+\newcommand{\ANCHOR}{\textsc{ANCHOR}}
+\newcommand{\AC}{\textsc{AC}}
+\newcommand{\AS}{\textsc{AS}}
+\newcommand{\AP}{\textsc{AP}}
+\newcommand{\SweepRT}{\textsc{SweepRT}}
+\newcommand{\KDS}{\textsc{KDS}}
+\newcommand{\BuildTime}{\ensuremath{\operatorname{BuildTime}}}
+\newcommand{\QueryTime}{\ensuremath{\operatorname{QueryTime}}}
+\newcommand{\CoreE}{\ensuremath{\operatorname{CoreE2E}}}
+\newcommand{\PeakRSS}{\ensuremath{\operatorname{PeakRSS}}}
+\newcommand{\AvgRSS}{\ensuremath{\operatorname{AvgRSS}}}
+\newcommand{\BuildPeakRSS}{\ensuremath{\operatorname{BuildPeakRSS}}}
+\newcommand{\QueryPeakRSS}{\ensuremath{\operatorname{QueryPeakRSS}}}
+\newcommand{\RSSAfterBuild}{\ensuremath{\operatorname{RSSAfterBuild}}}
+\newcommand{\RepeatedE}{\ensuremath{\operatorname{RepeatedE2E}}}
+\newcommand{\AmortizedE}{\ensuremath{\operatorname{AmortizedE2E}}}
+\newcommand{\status}[1]{\texttt{#1}}
+\newcommand{\alg}[1]{\textsc{#1}}
+
+\newcolumntype{Y}{>{\raggedright\arraybackslash}X}
+\newcolumntype{C}{>{\centering\arraybackslash}X}
+\setlength{\tabcolsep}{5pt}
+\renewcommand{\arraystretch}{1.15}
+
+\title{Experimental Setup for \ANCHOR}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+
+\section{Experiment Scope}
+
+\subsection{Algorithms}
+The main comparison experiments run exactly three algorithms:
+\[
+\boxed{\mathrm{ANCHOR\text{-}Compiled},\ \mathrm{SweepRT},\ \mathrm{KDS}}.
+\]
+Their abbreviations are fixed as follows.
+
+\begin{center}
+\begin{tabularx}{0.78\linewidth}{@{}lY@{}}
+\toprule
+Abbreviation & Algorithm \\
+\midrule
+\AC & \ANCHOR{}-Compiled \\
+\SweepRT & two-pass sweep/range-tree sampler \\
+\KDS & KD-tree degree-factorized sampler \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+The \ANCHOR{} ablation experiments run the materialization family
+\[
+\boxed{
+\mathrm{Streaming}
+\rightarrow
+\mathrm{PrefixCache}(1)
+\rightarrow
+\mathrm{PrefixCache}(2)
+\rightarrow
+\cdots
+\rightarrow
+\mathrm{PrefixCache}(d-1)
+\rightarrow
+\mathrm{Compiled}
+}.
+\]
+For dimension $d$, the ablation variant set is
+\[
+\mathcal{V}_d
+=
+\{\mathrm{AS}\}
+\cup
+\{\mathrm{AP}(k):1\le k\le d-1\}
+\cup
+\{\mathrm{AC}\}.
+\]
+The abbreviations are as follows.
+
+\begin{center}
+\begin{tabularx}{0.78\linewidth}{@{}lY@{}}
+\toprule
+Abbreviation & Meaning \\
+\midrule
+\AS & \ANCHOR{}-Streaming \\
+\AP$(k)$ & \ANCHOR{}-PrefixCache$(k)$ \\
+\AC & \ANCHOR{}-Compiled \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+The experiments do not run $\mathrm{PrefixCache}(0)$ as a separate algorithm.  $\mathrm{PrefixCache}(0)$ is a root-level cache and has the same experimental role as the streaming limit; the no-cache endpoint is represented by \AS.  The variant $\mathrm{PrefixCache}(d-1)$ is retained because it is the deepest lazy terminal frontier, and it is the direct comparison point for the full terminal-atom compilation in \AC.
+
+\subsection{Data Collections}
+The experiments use four data collections.
+
+\begin{center}
+\begin{tabularx}{\linewidth}{@{}l l c Y@{}}
+\toprule
+Dataset & Type & Dimension & Role \\
+\midrule
+Alacarte & synthetic & $d\ge 2$ & controlled experiments over $N$, $t$, $\alpha$, $F$, and $d$ \\
+CMAB & real geospatial & 2 & urban spatial skew and density sweeps \\
+GeoLife & real spatiotemporal & 3 or 4 & trajectory correlation, temporal bursts, and higher-dimensional workloads \\
+COCO & real visual objects & 3 & image-blocked visual-object box joins \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+On each workload, every algorithm receives exactly the same raw rectangle arrays.
+
+\section{Common Measurement Protocol}
+
+\subsection{Input and Sampling Semantics}
+Each input consists of two relations,
+\[
+R=\{r_1,\ldots,r_{|R|}\},\qquad
+S=\{s_1,\ldots,s_{|S|}\}.
+\]
+Every object is a $d$-dimensional axis-aligned box.  All dimensions use the half-open interval convention $[L,U)$.  A pair $(r,s)$ belongs to the join result if and only if strict overlap holds in every dimension:
+\[
+\max\left(L_r^{(j)},L_s^{(j)}\right)
+<
+\min\left(U_r^{(j)},U_s^{(j)}\right),
+\qquad j=1,\ldots,d.
+\]
+The join result is
+\[
+J=\{(r,s):r\in R,\ s\in S,\ r\cap s\ne\emptyset\}.
+\]
+A query returns an ordered sequence of length $t$,
+\[
+(X_1,\ldots,X_t).
+\]
+The sampling semantics are independent, uniform, and with replacement:
+\[
+\Pr[X_i=(r,s)]=\frac{1}{|J|},
+\qquad \forall (r,s)\in J,
+\qquad i=1,\ldots,t.
+\]
+If $t=0$, the output is the empty sequence.  If $|J|=0$ and $t>0$, the run status is \status{EMPTY-JOIN}, and the output sequence is empty.
+
+\subsection{Timing Metrics}
+Timing starts after the raw rectangle arrays are already in memory.  Data generation, file reading, Parquet decoding, downloading, and one-time data cleaning are excluded from algorithm time.
+
+Each run records three time measurements.
+
+\begin{center}
+\begin{tabularx}{\linewidth}{@{}lY@{}}
+\toprule
+Metric & Definition \\
+\midrule
+\BuildTime & time from raw rectangle arrays to the algorithm representation \\
+\QueryTime & time from the algorithm representation to $t$ samples \\
+\CoreE & $\BuildTime+\QueryTime$ \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+Synthetic runs do not record Alacarte generation time.  Real-data runs do not record load time.  For repeated-query experiments, a single build is followed by $q$ consecutive queries.  The cumulative and amortized times are
+\[
+\RepeatedE(q)=\BuildTime+\sum_{i=1}^{q}\QueryTime_i,
+\]
+\[
+\AmortizedE(q)=
+\frac{\BuildTime+\sum_{i=1}^{q}\QueryTime_i}{q}.
+\]
+
+\subsection{Memory Metrics}
+Each run records one RSS-time curve,
+\[
+(\tau_i,\mathrm{RSS}_i,\mathrm{phase}_i),
+\qquad i=1,2,\ldots,m.
+\]
+The sampling period is fixed at $20$ ms.  The phase label takes only two values, \status{build} and \status{query}.  The following metrics are derived from the RSS-time curve.
+
+\begin{center}
+\begin{tabularx}{\linewidth}{@{}lY@{}}
+\toprule
+Metric & Definition \\
+\midrule
+\PeakRSS & maximum RSS over the full \CoreE{} interval \\
+\AvgRSS & time-weighted average RSS over the full \CoreE{} interval \\
+\BuildPeakRSS & maximum RSS within the build phase \\
+\QueryPeakRSS & maximum RSS within the query phase \\
+\RSSAfterBuild & RSS after build and before query starts \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+The output sample buffer is included in the process RSS.  Output bytes are not recorded separately.  All algorithms emit the same pair-id array representation.
+
+\subsection{Required Values for Each Run}
+Each run records at least the values listed below.
+
+\begin{center}
+\small
+\begin{tabularx}{\linewidth}{@{}lY@{}}
+\toprule
+Category & Values \\
+\midrule
+workload & dataset, experiment id, $|R|$, $|S|$, $d$, $t$ \\
+synthetic parameters & $N$, $\alpha_{\mathrm{target}}$, $\alpha_{\mathrm{expected}}$, $F$, seed \\
+real parameters & dataset-specific region, level, task, image count, or user count \\
+algorithm & \AC, \SweepRT, \KDS, \AS, or \AP$(k)$ \\
+count & $W=|J|$ \\
+density & $\alpha_{\mathrm{realized}}=W/(|R|+|S|)$ \\
+time & \BuildTime, \QueryTime, \CoreE{} \\
+memory & RSS-time curve path, \PeakRSS, \AvgRSS, \BuildPeakRSS, \QueryPeakRSS, \RSSAfterBuild{} \\
+correctness & status \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+The status values are fixed.
+
+\begin{center}
+\begin{tabularx}{\linewidth}{@{}lY@{}}
+\toprule
+Status & Meaning \\
+\midrule
+\status{OK} & the run finishes, and its count agrees with the other completed algorithms on the same workload \\
+\status{EMPTY-JOIN} & $W=0$ and $t>0$ \\
+\status{OOM} & the run exceeds the memory cap \\
+\status{TO} & the run exceeds the timeout \\
+\status{COUNT-MISMATCH} & completed algorithms disagree on $W$ \\
+\status{MEMBERSHIP-MISMATCH} & in small validation, at least one sampled pair is not in the materialized join $J$ \\
+\status{UNIFORMITY-WARN} & the hash-bucket sanity check reports a significant anomaly \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\subsection{Seeds, Repeats, Timeout, and Out-of-Memory Rules}
+Synthetic core experiments use dataset seeds
+\[
+\{0,1,2,3,4\}.
+\]
+Synthetic extra and stress experiments use dataset seeds
+\[
+\{0,1,2\}.
+\]
+Real-data experiments use process repeats
+\[
+\{0,1,2\}.
+\]
+The sampling seed is derived uniformly from the following fields:
+\[
+\mathrm{sampling\_seed}
+=
+\mathrm{hash}(\mathrm{experiment\_id},\mathrm{dataset\_id},\mathrm{algorithm},t,\mathrm{repeat\_id}).
+\]
+The timeout and memory cap are fixed as follows.
+
+\begin{center}
+\begin{tabularx}{0.72\linewidth}{@{}lY@{}}
+\toprule
+Item & Setting \\
+\midrule
+timeout & 2 hours per run \\
+memory cap & 80\% of machine physical memory \\
+OOM decision & RSS exceeds the memory cap \\
+TO decision & \CoreE{} exceeds 2 hours \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+A failed run keeps its status, completed-phase timings, RSS-time curve, and the last available value of $W$.  Failed runs are excluded from speedup calculations but retained in the final result files.
+
+\section{Correctness Validation}
+
+\subsection{Small Materialized Validation}
+The following small workloads directly materialize the full join result $J$.
+
+\begin{center}
+\begin{tabularx}{\linewidth}{@{}lY@{}}
+\toprule
+Data & Configuration \\
+\midrule
+Synthetic & $N=10^3$, $d=2$, $\alpha=1$, $F=\mathrm{F0}$ \\
+CMAB & the province with the smallest base-row count among provinces with at least $10^4$ base rows, level 1 \\
+GeoLife & the first 8 users after hash sorting, 3D, level 1 \\
+COCO & the 32 images with the smallest image ids, Task A and Task B \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+Each small workload verifies
+\[
+W_{\mathrm{materialized}}
+=
+W_{\mathrm{AC}}
+=
+W_{\mathrm{SweepRT}}
+=
+W_{\mathrm{KDS}}.
+\]
+It also checks that every sampled pair belongs to the materialized join $J$.
+
+Two edge cases are always run: $t=0$ and $W=0,t=10^5$.  For $t=0$, the output must be the empty sequence.  For $W=0,t>0$, the status must be \status{EMPTY-JOIN}.
+
+\subsection{Large Count Consistency}
+For every non-materialized workload, all completed algorithms must return the same count:
+\[
+W_{\mathrm{AC}}=W_{\mathrm{SweepRT}}=W_{\mathrm{KDS}}.
+\]
+For \ANCHOR{} ablations, all completed \ANCHOR{} variants must return the same count:
+\[
+W_{\mathrm{AS}}=W_{\mathrm{AP}(1)}=\cdots=W_{\mathrm{AP}(d-1)}=W_{\mathrm{AC}}.
+\]
+If an algorithm has status \status{OOM} or \status{TO}, it does not participate in the count equality check.  Whenever two or more algorithms finish, the completed algorithms are checked for agreement on $W$.
+
+\subsection{Hash-Bucket Uniformity Sanity Check}
+On each small materialized workload, every algorithm draws
+\[
+t=10^6
+\]
+samples.  Each sampled pair is mapped into $B=1000$ buckets by a fixed hash:
+\[
+\mathrm{bucket}(r,s)=\mathrm{hash}(r,s)\bmod 1000.
+\]
+The bucket frequencies are recorded, and the bucket counts are tested by a chi-square uniformity sanity check.
+
+\begin{center}
+\begin{tabularx}{\linewidth}{@{}lY@{}}
+\toprule
+Condition & Status \\
+\midrule
+sampled pair is not in $J$ & \status{MEMBERSHIP-MISMATCH} \\
+chi-square $p$-value $<10^{-6}$ & \status{UNIFORMITY-WARN} \\
+neither condition occurs & \status{OK} \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+This check also confirms that sampling is with replacement, duplicate pairs can appear, output order is preserved, and the pair-id convention is identical across algorithms.
+
+\section{Synthetic Experiments: Alacarte}
+
+\subsection{Synthetic Common Setup}
+Unless an experiment explicitly changes a parameter, synthetic runs use the following defaults.
+
+\begin{center}
+\begin{tabularx}{0.72\linewidth}{@{}lr@{}}
+\toprule
+Parameter & Default \\
+\midrule
+$|R|$ & $N$ \\
+$|S|$ & $N$ \\
+$N$ & $3\times10^5$ \\
+$t$ & $10^5$ \\
+$\alpha$ & 10 \\
+$d$ & 2 \\
+$F$ & F0: Cube-Fixed \\
+universe & $[0,1)^d$ \\
+coordinate dtype & float32 \\
+algorithms & \AC, \SweepRT, \KDS \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+Synthetic density is always defined as
+\[
+\alpha=\frac{|J|}{|R|+|S|}.
+\]
+When $|R|=|S|=N$,
+\[
+\alpha=\frac{|J|}{2N},
+\qquad |J|\approx 2\alpha N.
+\]
+Alacarte controls expected density.  Each generated dataset records
+\[
+\alpha_{\mathrm{target}},\quad
+\alpha_{\mathrm{expected}},\quad
+W=|J|,\quad
+\alpha_{\mathrm{realized}}=\frac{W}{2N}.
+\]
+
+\subsection{Geometry Families}
+\begin{center}
+\small
+\begin{tabularx}{\linewidth}{@{}l l r r Y@{}}
+\toprule
+Family & \texttt{volume\_dist} & \texttt{volume\_cv} & \texttt{shape\_sigma} & Workload \\
+\midrule
+F0: Cube-Fixed & fixed & ignored & 0.0 & equal-size squares or hypercubes \\
+F1: Cube-VolSkew & lognormal & 1.0 & 0.0 & size skew only \\
+F2: Mild-Aspect & fixed & ignored & 0.5 & mild aspect-ratio skew \\
+F3: Strong-Aspect & fixed & ignored & 1.0 & strong aspect-ratio skew \\
+F4: Needle & fixed & ignored & 1.5 & skinny rectangles or boxes \\
+F5: Mixed-Skew & lognormal & 1.0 & 1.0 & size skew and shape skew \\
+F6: Extreme-Mixed & lognormal & 2.0 & 1.5 & extreme skew stress \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\subsection{Core Synthetic Runs}
+All core synthetic runs use \AC, \SweepRT, and \KDS{} with dataset seeds $\{0,1,2,3,4\}$.
+
+\paragraph{G1. Input-size scaling: $N$-sweep.}
+\begin{center}
+\begin{tabularx}{0.82\linewidth}{@{}lY@{}}
+\toprule
+Parameter & Values \\
+\midrule
+$N$ & $10^4,3\cdot10^4,10^5,3\cdot10^5,10^6,3\cdot10^6$ \\
+$t$ & $10^5$ \\
+$\alpha$ & 10 \\
+$F$ & F0 \\
+$d$ & 2 \\
+\bottomrule
+\end{tabularx}
+\end{center}
+Record \BuildTime, \QueryTime, \CoreE, RSS-time curve, $W$, $\alpha_{\mathrm{realized}}$, and status.
+
+\paragraph{G2. Sample-size scaling: $t$-sweep.}
+\begin{center}
+\begin{tabularx}{0.82\linewidth}{@{}lY@{}}
+\toprule
+Parameter & Values \\
+\midrule
+$N$ & $3\cdot10^5$ \\
+$t$ & $1,10,10^2,10^3,10^4,10^5,10^6,10^7$ \\
+$\alpha$ & 10 \\
+$F$ & F0 \\
+$d$ & 2 \\
+\bottomrule
+\end{tabularx}
+\end{center}
+Record \BuildTime, \QueryTime, \CoreE, throughput $t/\QueryTime$, RSS-time curve, $W$, and status.
+
+\paragraph{G3. Output-density scaling: $\alpha$-sweep.}
+\begin{center}
+\begin{tabularx}{0.82\linewidth}{@{}lY@{}}
+\toprule
+Parameter & Values \\
+\midrule
+$N$ & $3\cdot10^5$ \\
+$t$ & $10^5$ \\
+$\alpha$ & $0.01,0.03,0.1,0.3,1,3,10,30,100,300,1000,3000,10000$ \\
+$F$ & F0 \\
+$d$ & 2 \\
+\bottomrule
+\end{tabularx}
+\end{center}
+Record \BuildTime, \QueryTime, \CoreE, RSS-time curve, $W$, $\alpha_{\mathrm{realized}}$, and status.
+
+\paragraph{G4. Shape and distribution robustness: $F$-sweep.}
+\begin{center}
+\begin{tabularx}{0.82\linewidth}{@{}lY@{}}
+\toprule
+Parameter & Values \\
+\midrule
+$N$ & $3\cdot10^5$ \\
+$t$ & $10^5$ \\
+$\alpha$ & 10 \\
+$F$ & F0, F1, F2, F3, F4, F5, F6 \\
+$d$ & 2 \\
+\bottomrule
+\end{tabularx}
+\end{center}
+Record \BuildTime, \QueryTime, \CoreE, RSS-time curve, $W$, and status.
+
+\paragraph{G5. Dimensionality scaling: $d$-sweep.}
+\begin{center}
+\begin{tabularx}{0.82\linewidth}{@{}lY@{}}
+\toprule
+Parameter & Values \\
+\midrule
+$N$ & $10^5$ \\
+$t$ & $10^5$ \\
+$\alpha$ & 10 \\
+$F$ & F0 \\
+$d$ & 2, 3, 4, 5, 6 \\
+\bottomrule
+\end{tabularx}
+\end{center}
+Record \BuildTime, \QueryTime, \CoreE, RSS-time curve, $W$, and status.
+
+\subsection{Extra Synthetic Grids}
+Extra synthetic grids use dataset seeds $\{0,1,2\}$.
+
+\paragraph{H1. $N\times\alpha$.}
+\begin{center}
+\begin{tabularx}{0.82\linewidth}{@{}lY@{}}
+\toprule
+Parameter & Values \\
+\midrule
+$N$ & $3\cdot10^4,10^5,3\cdot10^5,10^6$ \\
+$\alpha$ & $0.1,1,10,100,1000$ \\
+$t$ & $10^5$ \\
+$F$ & F0 \\
+$d$ & 2 \\
+algorithms & \AC, \SweepRT, \KDS \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\paragraph{H2. $t\times\alpha$.}
+\begin{center}
+\begin{tabularx}{0.82\linewidth}{@{}lY@{}}
+\toprule
+Parameter & Values \\
+\midrule
+$N$ & $3\cdot10^5$ \\
+$t$ & $10^2,10^4,10^6,10^7$ \\
+$\alpha$ & $0.1,10,1000$ \\
+$F$ & F0 \\
+$d$ & 2 \\
+algorithms & \AC, \SweepRT, \KDS \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\paragraph{H3. $d\times F$.}
+\begin{center}
+\begin{tabularx}{0.82\linewidth}{@{}lY@{}}
+\toprule
+Parameter & Values \\
+\midrule
+$N$ & $10^5$ \\
+$t$ & $10^5$ \\
+$\alpha$ & 10 \\
+$F$ & F0, F2, F4, F6 \\
+$d$ & 2, 3, 4, 5 \\
+algorithms & \AC, \SweepRT, \KDS \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\subsection{Synthetic Stress Runs}
+Stress runs use dataset seeds $\{0,1,2\}$.
+
+\paragraph{S1. Extremely sparse joins.}
+\begin{center}
+\begin{tabularx}{0.82\linewidth}{@{}lY@{}}
+\toprule
+Parameter & Values \\
+\midrule
+$N$ & $10^6$ \\
+$t$ & $1,10^5$ \\
+$\alpha$ & $0.001,0.003,0.01$ \\
+$F$ & F0 \\
+$d$ & 2 \\
+algorithms & \AC, \SweepRT, \KDS \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\paragraph{S2. Extremely dense joins.}
+\begin{center}
+\begin{tabularx}{0.82\linewidth}{@{}lY@{}}
+\toprule
+Parameter & Values \\
+\midrule
+$N$ & $3\cdot10^5$ \\
+$t$ & $10^5$ \\
+$\alpha$ & $10^4,3\cdot10^4$ \\
+$F$ & F0 \\
+$d$ & 2 \\
+algorithms & \AC, \SweepRT, \KDS \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\paragraph{S3. Geometry stress.}
+\begin{center}
+\begin{tabularx}{0.82\linewidth}{@{}lY@{}}
+\toprule
+Parameter & Values \\
+\midrule
+$N$ & $3\cdot10^5$ \\
+$t$ & $10^5$ \\
+$\alpha$ & $0.1,10,1000$ \\
+$F$ & F4, F6 \\
+$d$ & 2, 4 \\
+algorithms & \AC, \SweepRT, \KDS \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\paragraph{S4. High-dimensional stress.}
+\begin{center}
+\begin{tabularx}{0.82\linewidth}{@{}lY@{}}
+\toprule
+Parameter & Values \\
+\midrule
+$N$ & $3\cdot10^4$ \\
+$t$ & $10^5$ \\
+$\alpha$ & 10 \\
+$F$ & F0 \\
+$d$ & 6, 8, 10 \\
+algorithms & \AC, \SweepRT, \KDS \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\section{\ANCHOR{} Ablation Experiments}
+
+\subsection{Ablation Common Setup}
+\ANCHOR{} ablation experiments compare only \ANCHOR{} variants:
+\[
+\mathcal{V}_d
+=
+\{\mathrm{AS}\}
+\cup
+\{\mathrm{AP}(k):1\le k\le d-1\}
+\cup
+\{\mathrm{AC}\}.
+\]
+For $d=4$, the variants are
+\[
+\boxed{\mathrm{AS},\ \mathrm{AP}(1),\ \mathrm{AP}(2),\ \mathrm{AP}(3),\ \mathrm{AC}}.
+\]
+Every ablation run records all metrics in the common measurement protocol and also records structural metrics.
+
+For \AP$(k)$, the structural metrics are as follows.
+
+\begin{center}
+\begin{tabularx}{\linewidth}{@{}lY@{}}
+\toprule
+Metric & Definition \\
+\midrule
+frontier block count & $|\mathcal{F}_k|$ \\
+positive frontier count & $|\mathcal{F}_k^+|$ \\
+duplicated record volume & $M_k=\sum_u(|R_u|+|S_u|)$ \\
+duplication factor & $\rho_k=M_k/(|R|+|S|)$ \\
+selected frontier blocks & $U_k(t)$ \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+The variant \AP$(d-1)$ additionally records the following metrics.
+
+\begin{center}
+\begin{tabularx}{\linewidth}{@{}lY@{}}
+\toprule
+Metric & Definition \\
+\midrule
+selected terminal frontier blocks & $U_{d-1}(t)$ \\
+terminal atoms constructed during query & $|\mathcal{T}_{\mathrm{query}}|$ \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+For \AC, the structural metrics are as follows.
+
+\begin{center}
+\begin{tabularx}{\linewidth}{@{}lY@{}}
+\toprule
+Metric & Definition \\
+\midrule
+total terminal atoms & $|\mathcal{T}|$ \\
+positive terminal atoms & $|\mathcal{T}^+|$ \\
+weighted-index weight sum & $W$ \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\subsection{Core Ablation Runs}
+
+\paragraph{A1. Materialization-level comparison.}
+\begin{center}
+\begin{tabularx}{0.82\linewidth}{@{}lY@{}}
+\toprule
+Parameter & Values \\
+\midrule
+$N$ & $10^5$ \\
+$d$ & 4 \\
+$t$ & $10^5$ \\
+$\alpha$ & 10 \\
+$F$ & F0 \\
+variants & \AS, \AP(1), \AP(2), \AP(3), \AC \\
+\bottomrule
+\end{tabularx}
+\end{center}
+Record \BuildTime, \QueryTime, \CoreE, RSS-time curve, $W$, all structural metrics, and status.
+
+\paragraph{A2. Repeated-query amortization.}
+\begin{center}
+\begin{tabularx}{0.82\linewidth}{@{}lY@{}}
+\toprule
+Parameter & Values \\
+\midrule
+$N$ & $10^5$ \\
+$d$ & 4 \\
+$\alpha$ & 10 \\
+$F$ & F0 \\
+per-query $t$ & $10^3,10^5$ \\
+query count $q$ & $1,2,4,8,16,32,64,128$ \\
+variants & \AS, \AP(1), \AP(2), \AP(3), \AC \\
+\bottomrule
+\end{tabularx}
+\end{center}
+Record \BuildTime, each $\QueryTime_i$, \RepeatedE$(q)$, \AmortizedE$(q)$, RSS-time curve, $W$, structural metrics, and status.
+
+\paragraph{A3. Sample-size sweep inside \ANCHOR.}
+\begin{center}
+\begin{tabularx}{0.82\linewidth}{@{}lY@{}}
+\toprule
+Parameter & Values \\
+\midrule
+$N$ & $10^5$ \\
+$d$ & 4 \\
+$\alpha$ & 10 \\
+$F$ & F0 \\
+$t$ & $1,10,10^2,10^3,10^4,10^5,10^6,10^7$ \\
+variants & \AS, \AP(1), \AP(2), \AP(3), \AC \\
+\bottomrule
+\end{tabularx}
+\end{center}
+Record \BuildTime, \QueryTime, \CoreE, throughput $t/\QueryTime$, RSS-time curve, $W$, structural metrics, and status.
+
+\paragraph{A4. Density sweep inside \ANCHOR.}
+\begin{center}
+\begin{tabularx}{0.82\linewidth}{@{}lY@{}}
+\toprule
+Parameter & Values \\
+\midrule
+$N$ & $10^5$ \\
+$d$ & 4 \\
+$t$ & $10^5$ \\
+$F$ & F0 \\
+$\alpha$ & $0.01,0.1,1,10,100,1000$ \\
+variants & \AS, \AP(1), \AP(2), \AP(3), \AC \\
+\bottomrule
+\end{tabularx}
+\end{center}
+Record \BuildTime, \QueryTime, \CoreE, RSS-time curve, $W$, $\alpha_{\mathrm{realized}}$, structural metrics, and status.
+
+\subsection{Extra Ablation Runs}
+
+\paragraph{B1. Dimension-aware materialization.}
+\begin{center}
+\begin{tabularx}{0.82\linewidth}{@{}lY@{}}
+\toprule
+Parameter & Values \\
+\midrule
+$N$ & $10^5$ \\
+$t$ & $10^5$ \\
+$\alpha$ & 10 \\
+$F$ & F0 \\
+$d$ & 2, 3, 4, 5 \\
+\bottomrule
+\end{tabularx}
+\end{center}
+The variants are selected by dimension.
+\begin{center}
+\begin{tabularx}{0.82\linewidth}{@{}rY@{}}
+\toprule
+$d$ & Variants \\
+\midrule
+2 & \AS, \AP(1), \AC \\
+3 & \AS, \AP(1), \AP(2), \AC \\
+4 & \AS, \AP(1), \AP(2), \AP(3), \AC \\
+5 & \AS, \AP(1), \AP(2), \AP(3), \AP(4), \AC \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\paragraph{B2. Geometry robustness inside \ANCHOR.}
+\begin{center}
+\begin{tabularx}{0.82\linewidth}{@{}lY@{}}
+\toprule
+Parameter & Values \\
+\midrule
+$N$ & $10^5$ \\
+$d$ & 4 \\
+$t$ & $10^5$ \\
+$\alpha$ & 10 \\
+$F$ & F0, F2, F4, F6 \\
+variants & \AS, \AP(1), \AP(2), \AP(3), \AC \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\paragraph{B3. Large-$N$ ablation stress.}
+\begin{center}
+\begin{tabularx}{0.82\linewidth}{@{}lY@{}}
+\toprule
+Parameter & Values \\
+\midrule
+$d$ & 3 \\
+$N$ & $3\cdot10^4,10^5,3\cdot10^5,10^6$ \\
+$t$ & $10^5$ \\
+$\alpha$ & 10 \\
+$F$ & F0 \\
+variants & \AS, \AP(1), \AP(2), \AC \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\paragraph{B4. Last-mile compilation.}
+\begin{center}
+\begin{tabularx}{0.82\linewidth}{@{}lY@{}}
+\toprule
+Parameter & Values \\
+\midrule
+$N$ & $10^5$ \\
+$d$ & 4 \\
+$\alpha$ & $0.1,10,1000$ \\
+$t$ & $1,10^3,10^5,10^7$ \\
+$F$ & F0 \\
+variants & \AP(3), \AC \\
+\bottomrule
+\end{tabularx}
+\end{center}
+B4 compares only the deepest lazy terminal frontier against full terminal-atom compilation.
+
+\section{Real-Data Experiments}
+
+\subsection{Real-Data Common Setup}
+For real-data algorithms, timing starts after the unified raw rectangle arrays are already in memory.  File reading, Parquet scans, decoding, filtering, coordinate conversion, image selection, user selection, and province selection are completed before timing starts.
+
+All real-data runs use the following default algorithm set:
+\[
+\boxed{\mathrm{AC},\ \mathrm{SweepRT},\ \mathrm{KDS}}.
+\]
+Each real-data workload records
+\[
+|R|,\quad |S|,\quad d,\quad t,\quad W=|J|,\quad
+\alpha_{\mathrm{realized}}=\frac{W}{|R|+|S|}.
+\]
+Real-data ablation runs use the corresponding full \ANCHOR{} family $\mathcal{V}_d$ for the workload dimension.
+
+\subsection{CMAB Configurations}
+CMAB uses 2D boxes.  The main task is an influence-to-base join.  For level $\ell$,
+\[
+R_\ell=\{\text{expanded influence AABBs at level }\ell\},
+\]
+\[
+S=\{\text{base building AABBs}\}.
+\]
+Region selection is fixed as follows.
+
+\begin{center}
+\begin{tabularx}{\linewidth}{@{}lY@{}}
+\toprule
+Region name & Definition \\
+\midrule
+$P_{25}$ & province closest to the 25\% rank after sorting by base-row count \\
+$P_{50}$ & province closest to the 50\% rank after sorting by base-row count \\
+$P_{90}$ & province closest to the 90\% rank after sorting by base-row count \\
+$P_{\max}$ & province with the largest base-row count \\
+All-China & all provinces \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+The CMAB runs are fixed below.
+
+\begin{center}
+\small
+\begin{tabularx}{\linewidth}{@{}l Y Y r r@{}}
+\toprule
+ID & Workload & Region & Level & $t$ \\
+\midrule
+C1 & influence-to-base & $P_{\max}$ & 1, 2, 3, 4 & $10^5$ \\
+C2 & influence-to-base & $P_{25},P_{50},P_{90},P_{\max}$, All-China & 2 & $10^5$ \\
+C3 & dense influence-to-base & $P_{\max}$, All-China & 4 & $10^5$ \\
+C4 & function-filtered influence & $P_{\max}$ & 3 & $10^5$ \\
+C5 & $t$-sweep & $P_{\max}$ & 2 & $1,10^3,10^5,10^6,10^7$ \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+C4 uses the top five building-function categories by row count.  For each category $c$,
+\[
+R=\{\text{level-3 expanded AABBs with function }c\},
+\qquad
+S=\{\text{all base AABBs in }P_{\max}\}.
+\]
+
+\subsection{GeoLife Configurations}
+GeoLife uses 3D or 4D integer spatiotemporal boxes.  The dimensions are defined as follows.
+
+\begin{center}
+\begin{tabularx}{0.5\linewidth}{@{}rY@{}}
+\toprule
+Dimensions & Coordinates \\
+\midrule
+3 & $(x,y,t)$ \\
+4 & $(x,y,z,t)$ \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+Raw integer closed intervals $[L,U]$ are converted during data preparation into half-open intervals:
+\[
+[L,U+1).
+\]
+The main task uses a deterministic user partition:
+\[
+U_R=\{u:\mathrm{hash}(u)\bmod 2=0\},
+\]
+\[
+U_S=\{u:\mathrm{hash}(u)\bmod 2=1\}.
+\]
+Then
+\[
+R=\{\text{records from }U_R\},
+\qquad
+S=\{\text{records from }U_S\}.
+\]
+User subset selection is fixed by sorting users by $\mathrm{hash}(\mathrm{user\_id})$, taking the first $m$ users, and then splitting them into $R$ and $S$ by hash parity.
+
+The GeoLife runs are fixed below.
+
+\begin{center}
+\small
+\begin{tabularx}{\linewidth}{@{}l r r Y Y Y@{}}
+\toprule
+ID & Dimensions & Level & Users & Split & $t$ \\
+\midrule
+GL1 & 3, 4 & 1, 2, 3 & all users & hash-even vs. hash-odd & $10^5$ \\
+GL2 & 4 & 2 & 16, 32, 64, 128, all users & hash-even vs. hash-odd & $10^5$ \\
+GL3 & 4 & 2 & all users & hash-even vs. hash-odd & $1,10^3,10^5,10^6,10^7$ \\
+GL4 & 3, 4 & 2 & all users & two logical copies & $10^5$ \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+GL4 constructs two logical copies of the same record set:
+\[
+R=\{\text{all records with copied ids }R\},
+\qquad
+S=\{\text{all records with copied ids }S\}.
+\]
+No same-source-record exclusion is applied in GL4.
+
+\subsection{COCO Configurations}
+COCO uses 3D boxes.  Each image corresponds to one $z$-slice:
+\[
+[x_1,x_2)\times[y_1,y_2)\times[z,z+1).
+\]
+Image subset selection is fixed by sorting images by image id and taking the first $M$ images.
+
+Task A is GT $\times$ Proposal:
+\[
+R=\{\text{GT boxes}\},
+\qquad
+S=\{\text{proposal boxes}\}.
+\]
+Task B is Proposal $\times$ Proposal.  For each image, proposals are sorted by descending score.  If an image has $m$ proposals, then
+\[
+R=\{\text{proposal ranks }1,\ldots,\min(5000,m)\},
+\]
+\[
+S=\{\text{proposal ranks }5001,\ldots,\min(10000,m)\}.
+\]
+If $R$ or $S$ is empty for an image, that image contributes no Task B pairs.
+
+The execution modes are as follows.
+
+\begin{center}
+\small
+\begin{tabularx}{\linewidth}{@{}lY@{}}
+\toprule
+Mode & Timing definition \\
+\midrule
+generic-3D & boxes from the selected images are merged into one 3D relation pair, and the algorithm is run directly \\
+image-blocked & each image is a disjoint block; \BuildTime{} includes all block builds and the global block weighted index; \QueryTime{} includes block weighted draws and block-local sampling \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+Image-blocked mode uses exact weighted composition:
+\[
+J=\biguplus_g J_g,
+\qquad
+W_g=|J_g|,
+\qquad
+\Pr[g]=\frac{W_g}{\sum_h W_h}.
+\]
+For a fixed COCO workload, \AC, \SweepRT, and \KDS{} must use the same execution mode.
+
+The COCO runs are fixed below.
+
+\begin{center}
+\small
+\begin{tabularx}{\linewidth}{@{}l Y Y l Y@{}}
+\toprule
+ID & Task & Images $M$ & Mode & $t$ \\
+\midrule
+CO-A1 & GT $\times$ Proposal & 1024, 4096, 16384 & generic-3D & $10^5$ \\
+CO-A2 & GT $\times$ Proposal & 65536, 123287 & image-blocked & $10^5$ \\
+CO-B1 & Proposal $\times$ Proposal & 128, 512, 1024 & generic-3D & $10^5$ \\
+CO-B2 & Proposal $\times$ Proposal & 4096, 16384 & image-blocked & $10^5$ \\
+CO-A3 & GT $\times$ Proposal & 16384 & generic-3D & $1,10^3,10^5,10^6,10^7$ \\
+CO-B3 & Proposal $\times$ Proposal & 1024 & generic-3D & $1,10^3,10^5,10^6,10^7$ \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\subsection{Real-Data \ANCHOR{} Ablation}
+Real-data ablation uses the full \ANCHOR{} family for the corresponding dimension.
+
+\begin{center}
+\small
+\begin{tabularx}{\linewidth}{@{}l Y r Y r@{}}
+\toprule
+Dataset & Workload & $d$ & Variants & $t$ \\
+\midrule
+CMAB & $P_{\max}$, level 2, influence-to-base & 2 & \AS, \AP(1), \AC & $10^5$ \\
+GeoLife & 4D, level 2, all users, hash split & 4 & \AS, \AP(1), \AP(2), \AP(3), \AC & $10^5$ \\
+COCO & Task A, 16384 images, generic-3D & 3 & \AS, \AP(1), \AP(2), \AC & $10^5$ \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+Each run records \BuildTime, \QueryTime, \CoreE, RSS-time curve, $W$, $\alpha_{\mathrm{realized}}$, structural metrics, and status.
+
+\section{Final Experiment Set}
+The complete experiment set is as follows.
+
+\begin{center}
+\small
+\begin{tabularx}{\linewidth}{@{}lY@{}}
+\toprule
+Section & Runs \\
+\midrule
+Correctness & small materialized validation, large count consistency, hash-bucket sanity check \\
+Synthetic core & G1, G2, G3, G4, G5 \\
+Synthetic extra & H1, H2, H3 \\
+Synthetic stress & S1, S2, S3, S4 \\
+\ANCHOR{} ablation core & A1, A2, A3, A4 \\
+\ANCHOR{} ablation extra & B1, B2, B3, B4 \\
+Real data & CMAB C1--C5, GeoLife GL1--GL4, COCO CO-A1--CO-A3 and CO-B1--CO-B3 \\
+Real-data \ANCHOR{} ablation & representative CMAB, GeoLife, and COCO workloads \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+Every completed run must produce plain numeric results:
+\[
+\BuildTime,\quad
+\QueryTime,\quad
+\CoreE,\quad
+\text{RSS-time curve},\quad
+W,\quad
+\alpha_{\mathrm{realized}},\quad
+\text{status}.
+\]
+\ANCHOR{} ablations additionally produce
+\[
+|\mathcal{F}_k|,\quad
+|\mathcal{F}_k^+|,\quad
+M_k,\quad
+\rho_k,\quad
+U_k(t),\quad
+|\mathcal{T}|,\quad
+|\mathcal{T}^+|.
+\]
+
+\end{document}
